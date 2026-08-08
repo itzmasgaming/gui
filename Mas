@@ -460,7 +460,7 @@ run_system_spec() {
 
     echo -e "${CYAN}CPU Model:${NC}        $cpu_model"
     echo -e "${CYAN}Cores/Threads:${NC}    $thread_count"
-    echo -e "${CYAN}Core/Thread Range:${NC} $core_range  ${YELLOW}(as allowed by Docker cgroup)${NC}"
+    echo -e "${CYAN}Core/Thread Range:${NC} $core_range"
     echo ""
     echo -e "${CYAN}RAM Total:${NC}        ${mem_total_gb} GB"
     echo -e "${CYAN}RAM Used:${NC}         ${mem_used_gb} GB"
