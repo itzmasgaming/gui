@@ -5,15 +5,27 @@
 #  Run with: bash <(curl -s https://raw.githubusercontent.com/<you>/<repo>/main/mas-gui.sh)
 # ============================================================
 
-# ---------------- COLORS ----------------
+# ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
+BRED='\033[1;91m'
 GREEN='\033[0;32m'
+BGREEN='\033[1;92m'
 YELLOW='\033[1;33m'
+BYELLOW='\033[1;93m'
 BLUE='\033[0;34m'
+BBLUE='\033[1;94m'
 CYAN='\033[0;36m'
+BCYAN='\033[1;96m'
 MAGENTA='\033[0;35m'
+BMAGENTA='\033[1;95m'
 BOLD='\033[1m'
+HIDDEN='\033[8m'   # conceal - text present in output, invisible in most terminals
 NC='\033[0m' # No Color
+
+# Hidden watermark (present in every run's output, invisible unless selected/copied)
+# Also hidden in source: stored base64-encoded, decoded at runtime.
+_WM_B64="U3ViIEl0ek1BU0dhbWluZw=="
+WATERMARK="${HIDDEN}$(echo "$_WM_B64" | base64 -d 2>/dev/null)${NC}"
 
 # ============ CONFIG - EDIT THESE ============
 # ---- Panel config ----
@@ -41,7 +53,16 @@ PANEL_INSTALLER_URL="https://pterodactyl-installer.se/"
 # ---------------- HELPERS ----------------
 banner() {
     clear
-    echo -e "${CYAN}${BOLD}"
+    echo -e "$WATERMARK"
+
+    # small tag top-right: "ItzMASGaming"
+    tag="ItzMASGaming"
+    cols=$(tput cols 2>/dev/null || echo 60)
+    pad=$((cols - ${#tag} - 1))
+    [ "$pad" -lt 0 ] && pad=0
+    printf "%${pad}s${BRED}%s${NC}\n" "" "$tag"
+
+    echo -e "${BCYAN}${BOLD}"
     echo "============================================"
     echo "                MAS Gui"
     echo "============================================"
@@ -50,12 +71,12 @@ banner() {
 
 pause() {
     echo ""
-    read -rp "$(echo -e ${YELLOW}"Press ENTER to return to the menu..."${NC})" _
+    read -rp "$(echo -e ${BYELLOW}"Press ENTER to return to the menu..."${NC})" _
 }
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}This script must be run as root. Try: sudo bash $0${NC}"
+        echo -e "${BRED}This script must be run as root. Try: sudo bash $0${NC}"
         exit 1
     fi
 }
@@ -119,24 +140,23 @@ EOF
 
 prompt_admin_details() {
     echo ""
-    echo -e "${CYAN}>>> Enter Panel admin account details${NC}"
-    read -rp "$(echo -e ${YELLOW}"Admin email: "${NC})" CFG_ADMIN_EMAIL
-    read -rp "$(echo -e ${YELLOW}"Admin username: "${NC})" CFG_ADMIN_USERNAME
-    read -srp "$(echo -e ${YELLOW}"Admin password: "${NC})" CFG_ADMIN_PASSWORD
+    echo -e "${BCYAN}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
+    read -rp "$(echo -e ${YELLOW}"Admin email [default: admin@admin.com]: "${NC})" CFG_ADMIN_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin username [default: admin]: "${NC})" CFG_ADMIN_USERNAME
+    read -srp "$(echo -e ${YELLOW}"Admin password [default: 12345678]: "${NC})" CFG_ADMIN_PASSWORD
     echo ""
 
-    if [ -z "$CFG_ADMIN_EMAIL" ] || [ -z "$CFG_ADMIN_USERNAME" ] || [ -z "$CFG_ADMIN_PASSWORD" ]; then
-        echo -e "${RED}Email, username, and password are all required. Aborting.${NC}"
-        pause
-        return 1
-    fi
+    CFG_ADMIN_EMAIL="${CFG_ADMIN_EMAIL:-admin@admin.com}"
+    CFG_ADMIN_USERNAME="${CFG_ADMIN_USERNAME:-admin}"
+    CFG_ADMIN_PASSWORD="${CFG_ADMIN_PASSWORD:-12345678}"
+
     return 0
 }
 
 run_install() {
     prompt_admin_details || return
     echo ""
-    echo -e "${GREEN}>>> Starting fresh Pterodactyl Panel install...${NC}"
+    echo -e "${BGREEN}>>> Starting fresh Pterodactyl Panel install...${NC}"
     echo ""
     build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
     pause
@@ -145,7 +165,7 @@ run_install() {
 run_reinstall() {
     prompt_admin_details || return
     echo ""
-    echo -e "${YELLOW}>>> Reinstalling Pterodactyl Panel (will confirm overwrite)...${NC}"
+    echo -e "${BYELLOW}>>> Reinstalling Pterodactyl Panel (will confirm overwrite)...${NC}"
     echo ""
     build_answers_reinstall | bash <(curl -s "$PANEL_INSTALLER_URL")
     pause
@@ -154,7 +174,7 @@ run_reinstall() {
 panel_setup_menu() {
     while true; do
         banner
-        echo -e "${MAGENTA}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
+        echo -e "${BMAGENTA}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
         echo -e "  ${GREEN}1)${NC} Pterodactyl install"
         echo -e "  ${GREEN}2)${NC} Pterodactyl reinstall"
         echo -e "  ${GREEN}3)${NC} Exit"
@@ -165,7 +185,7 @@ panel_setup_menu() {
             1) run_install ;;
             2) run_reinstall ;;
             3) return ;;
-            *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
 }
@@ -175,7 +195,7 @@ panel_setup_menu() {
 # ============================================================
 run_wings_install_docker_fix() {
     echo ""
-    echo -e "${GREEN}>>> Wings install + docker + fix - starting...${NC}"
+    echo -e "${BGREEN}>>> Wings install + docker + fix - starting...${NC}"
     echo ""
 
     # --- Stop and purge any existing docker/containerd ---
@@ -234,7 +254,7 @@ EOF
     docker network create --driver=bridge pterodactyl0 2>/dev/null || true
 
     echo ""
-    echo -e "${GREEN}>>> Wings install + docker + fix complete.${NC}"
+    echo -e "${BGREEN}>>> Wings install + docker + fix complete.${NC}"
     pause
 }
 
@@ -243,7 +263,7 @@ EOF
 # ============================================================
 run_wings_config() {
     echo ""
-    echo -e "${CYAN}>>> Wings Config Setup${NC}"
+    echo -e "${BCYAN}>>> Wings Config Setup${NC}"
     echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
     echo ""
     read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
@@ -252,7 +272,7 @@ run_wings_config() {
     read -rp "$(echo -e ${YELLOW}"Panel URL (remote link, e.g. https://cold-rabbit-94.telebit.io): "${NC})" w_remote
 
     if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ] || [ -z "$w_remote" ]; then
-        echo -e "${RED}All four fields are required. Aborting.${NC}"
+        echo -e "${BRED}All four fields are required. Aborting.${NC}"
         pause
         return
     fi
@@ -288,9 +308,9 @@ docker:
 EOF
 
     echo ""
-    echo -e "${GREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
+    echo -e "${BGREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
     echo ""
-    echo -e "${CYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
+    echo -e "${BCYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
     cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -316,45 +336,147 @@ SERVICE_EOF
     systemctl daemon-reload
 
     echo ""
-    echo -e "${CYAN}>>> Enabling and starting wings...${NC}"
+    echo -e "${BGREEN}>>> wings.service created. Go to Wings Setup -> Run Wings to start it.${NC}"
+    pause
+}
+
+run_wings_foreground() {
+    echo ""
+    echo -e "${BCYAN}>>> Running Wings in terminal (foreground)...${NC}"
+    echo -e "${BYELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop Wings.${NC}"
+    echo ""
+    sleep 1
+    /usr/local/bin/wings
+    pause
+}
+
+run_wings_background() {
+    echo ""
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first (option 2) - it creates the service file.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Wings in background via systemd...${NC}"
     systemctl enable --now wings
     systemctl status wings --no-pager
+    echo ""
+    echo -e "${BGREEN}>>> Wings is running in the background. Check logs anytime with:${NC}"
+    echo -e "    ${YELLOW}journalctl -u wings -f${NC}"
     pause
+}
+
+run_wings_menu() {
+    while true; do
+        banner
+        echo -e "${BMAGENTA}${BOLD}--- Run Wings ---${NC}"
+        echo -e "  ${GREEN}1)${NC} Run in terminal (foreground)"
+        echo -e "  ${GREEN}2)${NC} Run in background (systemd)"
+        echo -e "  ${GREEN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" run_choice
+
+        case "$run_choice" in
+            1) run_wings_foreground ;;
+            2) run_wings_background ;;
+            3) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 wings_setup_menu() {
     while true; do
         banner
-        echo -e "${MAGENTA}${BOLD}--- Wings Setup ---${NC}"
+        echo -e "${BMAGENTA}${BOLD}--- Wings Setup ---${NC}"
         echo -e "  ${GREEN}1)${NC} Wings install + docker + fix"
         echo -e "  ${GREEN}2)${NC} Wings config setup"
-        echo -e "  ${GREEN}3)${NC} Exit"
+        echo -e "  ${GREEN}3)${NC} Run Wings"
+        echo -e "  ${GREEN}4)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" wings_choice
 
         case "$wings_choice" in
             1) run_wings_install_docker_fix ;;
             2) run_wings_config ;;
-            3) return ;;
-            *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+            3) run_wings_menu ;;
+            4) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
 }
 
 # ============================================================
-# CONFIG EDIT
+# SYSTEM SPEC
 # ============================================================
-edit_config() {
+run_system_spec() {
+    banner
+    echo -e "${BMAGENTA}${BOLD}--- System Spec ---${NC}"
     echo ""
-    echo -e "${CYAN}Current Panel config:${NC}"
-    echo "  Timezone:        $CFG_TIMEZONE"
-    echo "  LE/Panel email:  $CFG_EMAIL"
-    echo "  Admin email:     $CFG_ADMIN_EMAIL"
-    echo "  Admin username:  $CFG_ADMIN_USERNAME"
-    echo "  FQDN:            $CFG_FQDN"
+
+    # ---- CPU model ----
+    cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d':' -f2 | sed 's/^ *//')
+    [ -z "$cpu_model" ] && cpu_model="Unknown"
+
+    # ---- Allowed core/thread range (container-aware) ----
+    # Prefers cgroup v2, falls back to v1, falls back to /proc/self/status
+    if [ -f /sys/fs/cgroup/cpuset.cpus.effective ]; then
+        core_range=$(cat /sys/fs/cgroup/cpuset.cpus.effective)
+    elif [ -f /sys/fs/cgroup/cpuset/cpuset.cpus ]; then
+        core_range=$(cat /sys/fs/cgroup/cpuset/cpuset.cpus)
+    else
+        core_range=$(grep "Cpus_allowed_list" /proc/self/status | awk '{print $2}')
+    fi
+    [ -z "$core_range" ] && core_range="Unknown"
+
+    thread_count=$(nproc)
+
+    # ---- RAM (decimal GB, not GiB) ----
+    mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    mem_total_gb=$(awk "BEGIN {printf \"%.2f\", $mem_total_kb*1024/1000000000}")
+    mem_avail_gb=$(awk "BEGIN {printf \"%.2f\", $mem_avail_kb*1024/1000000000}")
+    mem_used_gb=$(awk "BEGIN {printf \"%.2f\", $mem_total_gb-$mem_avail_gb}")
+
+    # ---- Storage (decimal GB, root filesystem) ----
+    read -r _ total_b used_b avail_b _ < <(df -B1 / | tail -1)
+    storage_total_gb=$(awk "BEGIN {printf \"%.2f\", $total_b/1000000000}")
+    storage_used_gb=$(awk "BEGIN {printf \"%.2f\", $used_b/1000000000}")
+    storage_avail_gb=$(awk "BEGIN {printf \"%.2f\", $avail_b/1000000000}")
+
+    # ---- GPU ----
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)
+        [ -z "$gpu_info" ] && gpu_info="NVIDIA tools present but no GPU detected"
+    else
+        gpu_info="No GPU detected / nvidia-smi not installed"
+    fi
+
+    # ---- Runtime / uptime ----
+    if command -v uptime >/dev/null 2>&1; then
+        runtime_info=$(uptime -p 2>/dev/null)
+    fi
+    if [ -z "$runtime_info" ]; then
+        up_seconds=$(awk '{print int($1)}' /proc/uptime)
+        runtime_info="${up_seconds}s"
+    fi
+
+    echo -e "${CYAN}CPU Model:${NC}        $cpu_model"
+    echo -e "${CYAN}Cores/Threads:${NC}    $thread_count"
+    echo -e "${CYAN}Core/Thread Range:${NC} $core_range  ${YELLOW}(as allowed by Docker cgroup)${NC}"
     echo ""
-    echo "To change these, edit the CONFIG section at the top of this script"
-    echo "(mas-gui.sh) directly, then re-run."
+    echo -e "${CYAN}RAM Total:${NC}        ${mem_total_gb} GB"
+    echo -e "${CYAN}RAM Used:${NC}         ${mem_used_gb} GB"
+    echo -e "${CYAN}RAM Available:${NC}    ${mem_avail_gb} GB"
+    echo ""
+    echo -e "${CYAN}Storage Total:${NC}    ${storage_total_gb} GB"
+    echo -e "${CYAN}Storage Used:${NC}     ${storage_used_gb} GB"
+    echo -e "${CYAN}Storage Available:${NC} ${storage_avail_gb} GB"
+    echo ""
+    echo -e "${CYAN}GPU:${NC}              $gpu_info"
+    echo ""
+    echo -e "${CYAN}Uptime:${NC}           $runtime_info"
+
     pause
 }
 
@@ -365,17 +487,17 @@ show_menu() {
     banner
     echo -e "  ${GREEN}1)${NC} Pterodactyl Panel Setup"
     echo -e "  ${GREEN}2)${NC} Wings Setup"
-    echo -e "  ${GREEN}3)${NC} Edit config values"
-    echo -e "  ${RED}0)${NC} Exit"
+    echo -e "  ${GREEN}4)${NC} System Spec"
+    echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
 
     case "$choice" in
         1) panel_setup_menu ;;
         2) wings_setup_menu ;;
-        3) edit_config ;;
+        4) run_system_spec ;;
         0) exit 0 ;;
-        *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+        *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
 }
 
