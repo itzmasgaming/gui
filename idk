@@ -484,7 +484,7 @@ show_menu() {
     banner
     echo -e "  ${CYAN}1)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}2)${NC} Wings Setup"
-    echo -e "  ${CYAN}4)${NC} System Spec"
+    echo -e "  ${CYAN}3)${NC} System Spec"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
