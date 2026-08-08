@@ -1,0 +1,344 @@
+#!/bin/bash
+#
+# ============================================================
+#  MAS Gui - Pterodactyl Panel + Wings installer/manager
+#  Run with: bash <(curl -s https://raw.githubusercontent.com/<you>/<repo>/main/mas-gui.sh)
+# ============================================================
+
+# ---------------- COLORS ----------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# ============ CONFIG - EDIT THESE ============
+# ---- Panel config ----
+CFG_TIMEZONE="Asia/Kolkata"
+CFG_EMAIL="ItzMASGaming@gmail.com"        # LE / panel email
+CFG_ADMIN_EMAIL="itzmasgaming@gmail.com"
+CFG_ADMIN_USERNAME="Itzmasgaming"
+CFG_ADMIN_FIRSTNAME="itzmas"
+CFG_ADMIN_LASTNAME="gaming"
+CFG_ADMIN_PASSWORD="000000"
+CFG_FQDN="cold-rabbit-94.telebit.io"
+
+CFG_DB_NAME=""
+CFG_DB_USER=""
+CFG_DB_PASS=""
+CFG_UFW="n"
+CFG_LETSENCRYPT="y"
+CFG_AGREE_HTTPS="y"
+CFG_PROCEED_ANYWAY="y"
+CFG_TELEMETRY="yes"
+CFG_CONTINUE_INSTALL="y"
+CFG_AGREE_TOS="y"
+CFG_ASSUME_SSL="y"
+
+PANEL_INSTALLER_URL="https://pterodactyl-installer.se/"
+# ===============================================
+
+# ---------------- HELPERS ----------------
+banner() {
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo "============================================"
+    echo "                MAS Gui"
+    echo "============================================"
+    echo -e "${NC}"
+}
+
+pause() {
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Press ENTER to return to the menu..."${NC})" _
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}This script must be run as root. Try: sudo bash $0${NC}"
+        exit 1
+    fi
+}
+
+# ============================================================
+# PANEL - build answer sequences
+# ============================================================
+build_answers_fresh_install() {
+    cat <<EOF
+0
+$CFG_DB_NAME
+$CFG_DB_USER
+$CFG_DB_PASS
+$CFG_TIMEZONE
+$CFG_EMAIL
+$CFG_ADMIN_EMAIL
+$CFG_ADMIN_USERNAME
+$CFG_ADMIN_FIRSTNAME
+$CFG_ADMIN_LASTNAME
+$CFG_ADMIN_PASSWORD
+$CFG_FQDN
+$CFG_UFW
+$CFG_LETSENCRYPT
+$CFG_AGREE_HTTPS
+$CFG_PROCEED_ANYWAY
+$CFG_TELEMETRY
+$CFG_CONTINUE_INSTALL
+$CFG_AGREE_TOS
+$CFG_ASSUME_SSL
+EOF
+}
+
+build_answers_reinstall() {
+    # Extra "y" right after mode select (0) to confirm overwrite.
+    # Placement is UNVERIFIED against a live "existing install found" prompt -
+    # test once and adjust if the real prompt lands elsewhere.
+    cat <<EOF
+0
+y
+$CFG_DB_NAME
+$CFG_DB_USER
+$CFG_DB_PASS
+$CFG_TIMEZONE
+$CFG_EMAIL
+$CFG_ADMIN_EMAIL
+$CFG_ADMIN_USERNAME
+$CFG_ADMIN_FIRSTNAME
+$CFG_ADMIN_LASTNAME
+$CFG_ADMIN_PASSWORD
+$CFG_FQDN
+$CFG_UFW
+$CFG_LETSENCRYPT
+$CFG_AGREE_HTTPS
+$CFG_PROCEED_ANYWAY
+$CFG_TELEMETRY
+$CFG_CONTINUE_INSTALL
+$CFG_AGREE_TOS
+$CFG_ASSUME_SSL
+EOF
+}
+
+run_install() {
+    echo ""
+    echo -e "${GREEN}>>> Starting fresh Pterodactyl Panel install...${NC}"
+    echo ""
+    build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
+    pause
+}
+
+run_reinstall() {
+    echo ""
+    echo -e "${YELLOW}>>> Reinstalling Pterodactyl Panel (will confirm overwrite)...${NC}"
+    echo ""
+    build_answers_reinstall | bash <(curl -s "$PANEL_INSTALLER_URL")
+    pause
+}
+
+panel_setup_menu() {
+    while true; do
+        banner
+        echo -e "${MAGENTA}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
+        echo -e "  ${GREEN}1)${NC} Pterodactyl install"
+        echo -e "  ${GREEN}2)${NC} Pterodactyl reinstall"
+        echo -e "  ${GREEN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" sub_choice
+
+        case "$sub_choice" in
+            1) run_install ;;
+            2) run_reinstall ;;
+            3) return ;;
+            *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# WINGS - install + docker + fix
+# ============================================================
+run_wings_install_docker_fix() {
+    echo ""
+    echo -e "${GREEN}>>> Wings install + docker + fix - starting...${NC}"
+    echo ""
+
+    # --- Stop and purge any existing docker/containerd ---
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker/daemon.json
+    apt-mark unhold docker-ce docker-ce-cli containerd.io 2>/dev/null
+
+    # --- Add Docker's official apt repo ---
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update
+
+    # --- Initial daemon.json (vfs storage driver) ---
+    mkdir -p /etc/docker
+    cat <<'EOF' > /etc/docker/daemon.json
+{
+  "storage-driver": "vfs"
+}
+EOF
+
+    # --- Install pinned safe versions ---
+    SAFE_CONTAINERD=$(apt-cache madison containerd.io | grep -m 1 '1.6.' | awk '{print $3}')
+    DOCKER_VER=$(apt-cache madison docker-ce | grep -m 1 '5:26.' | awk '{print $3}')
+    CLI_VER=$(apt-cache madison docker-ce-cli | grep -m 1 '5:26.' | awk '{print $3}')
+    apt-get install -y --allow-downgrades containerd.io="$SAFE_CONTAINERD" docker-ce="$DOCKER_VER" docker-ce-cli="$CLI_VER" docker-compose-plugin
+    apt-mark hold containerd.io docker-ce docker-ce-cli
+
+    systemctl enable --now containerd docker
+    docker run hello-world
+
+    # --- Final daemon.json (iptables + DNS) ---
+    cat <<'EOF' > /etc/docker/daemon.json
+{
+  "storage-driver": "vfs",
+  "iptables": true,
+  "dns": [
+    "1.1.1.1",
+    "8.8.8.8"
+  ]
+}
+EOF
+    systemctl restart docker
+
+    # --- Wings binary ---
+    mkdir -p /etc/pterodactyl
+    curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")"
+    chmod u+x /usr/local/bin/wings
+
+    # --- Self-signed cert ---
+    mkdir -p /etc/certs && cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 -subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" -keyout privkey.pem -out fullchain.pem
+
+    # --- Docker network ---
+    cd /etc/pterodactyl
+    docker network create --driver=bridge pterodactyl0 2>/dev/null || true
+
+    echo ""
+    echo -e "${GREEN}>>> Wings install + docker + fix complete.${NC}"
+    pause
+}
+
+# ============================================================
+# WINGS - config setup (config.yml generator)
+# ============================================================
+run_wings_config() {
+    echo ""
+    echo -e "${CYAN}>>> Wings Config Setup${NC}"
+    echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
+    read -rp "$(echo -e ${YELLOW}"Token ID: "${NC})" w_token_id
+    read -rp "$(echo -e ${YELLOW}"Token: "${NC})" w_token
+    read -rp "$(echo -e ${YELLOW}"Panel URL (remote link, e.g. https://cold-rabbit-94.telebit.io): "${NC})" w_remote
+
+    if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ] || [ -z "$w_remote" ]; then
+        echo -e "${RED}All four fields are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    mkdir -p /etc/pterodactyl
+
+    cat <<EOF > /etc/pterodactyl/config.yml
+debug: false
+uuid: $w_uuid
+token_id: $w_token_id
+token: $w_token
+api:
+  host: 0.0.0.0
+  port: 8443
+  ssl:
+    enabled: true
+    cert: /etc/certs/fullchain.pem
+    key: /etc/certs/privkey.pem
+  upload_limit: 100
+system:
+  data: /var/lib/pterodactyl/volumes
+  sftp:
+    bind_port: 2022
+allowed_mounts: []
+remote: '$w_remote'
+docker:
+  network:
+    name: pterodactyl_nw
+    interfaces:
+      v4:
+        subnet: 10.240.0.0/16
+        gateway: 10.240.0.1
+EOF
+
+    echo ""
+    echo -e "${GREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
+    echo ""
+    echo -e "${CYAN}>>> Enabling and starting wings...${NC}"
+    systemctl enable --now wings
+    systemctl status wings --no-pager
+    pause
+}
+
+wings_setup_menu() {
+    while true; do
+        banner
+        echo -e "${MAGENTA}${BOLD}--- Wings Setup ---${NC}"
+        echo -e "  ${GREEN}1)${NC} Wings install + docker + fix"
+        echo -e "  ${GREEN}2)${NC} Wings config setup"
+        echo -e "  ${GREEN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" wings_choice
+
+        case "$wings_choice" in
+            1) run_wings_install_docker_fix ;;
+            2) run_wings_config ;;
+            3) return ;;
+            *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# CONFIG EDIT
+# ============================================================
+edit_config() {
+    echo ""
+    echo -e "${CYAN}Current Panel config:${NC}"
+    echo "  Timezone:        $CFG_TIMEZONE"
+    echo "  LE/Panel email:  $CFG_EMAIL"
+    echo "  Admin email:     $CFG_ADMIN_EMAIL"
+    echo "  Admin username:  $CFG_ADMIN_USERNAME"
+    echo "  FQDN:            $CFG_FQDN"
+    echo ""
+    echo "To change these, edit the CONFIG section at the top of this script"
+    echo "(mas-gui.sh) directly, then re-run."
+    pause
+}
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+show_menu() {
+    banner
+    echo -e "  ${GREEN}1)${NC} Pterodactyl Panel Setup"
+    echo -e "  ${GREEN}2)${NC} Wings Setup"
+    echo -e "  ${GREEN}3)${NC} Edit config values"
+    echo -e "  ${RED}0)${NC} Exit"
+    echo ""
+    read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
+
+    case "$choice" in
+        1) panel_setup_menu ;;
+        2) wings_setup_menu ;;
+        3) edit_config ;;
+        0) exit 0 ;;
+        *) echo -e "${RED}Invalid option.${NC}"; sleep 1 ;;
+    esac
+}
+
+check_root
+while true; do
+    show_menu
+done
