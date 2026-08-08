@@ -55,14 +55,11 @@ banner() {
     clear
     echo -e "$WATERMARK"
 
-    # small tag top-right: "ItzMASGaming"
-    tag="ItzMASGaming"
-    cols=$(tput cols 2>/dev/null || echo 60)
-    pad=$((cols - ${#tag} - 1))
-    [ "$pad" -lt 0 ] && pad=0
-    printf "%${pad}s${BRED}%s${NC}\n" "" "$tag"
+    # small tag top-left: "ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
+    tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
+    echo -e "${BRED}${tag}${NC}"
 
-    echo -e "${BCYAN}${BOLD}"
+    echo -e "${CYAN}${BOLD}"
     echo "============================================"
     echo "                MAS Gui"
     echo "============================================"
@@ -140,7 +137,7 @@ EOF
 
 prompt_admin_details() {
     echo ""
-    echo -e "${BCYAN}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
+    echo -e "${CYAN}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
     read -rp "$(echo -e ${YELLOW}"Admin email [default: admin@admin.com]: "${NC})" CFG_ADMIN_EMAIL
     read -rp "$(echo -e ${YELLOW}"Admin username [default: admin]: "${NC})" CFG_ADMIN_USERNAME
     read -srp "$(echo -e ${YELLOW}"Admin password [default: 12345678]: "${NC})" CFG_ADMIN_PASSWORD
@@ -174,10 +171,10 @@ run_reinstall() {
 panel_setup_menu() {
     while true; do
         banner
-        echo -e "${BMAGENTA}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
-        echo -e "  ${GREEN}1)${NC} Pterodactyl install"
-        echo -e "  ${GREEN}2)${NC} Pterodactyl reinstall"
-        echo -e "  ${GREEN}3)${NC} Exit"
+        echo -e "${BRED}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Pterodactyl install"
+        echo -e "  ${CYAN}2)${NC} Pterodactyl reinstall"
+        echo -e "  ${CYAN}3)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" sub_choice
 
@@ -263,7 +260,7 @@ EOF
 # ============================================================
 run_wings_config() {
     echo ""
-    echo -e "${BCYAN}>>> Wings Config Setup${NC}"
+    echo -e "${CYAN}>>> Wings Config Setup${NC}"
     echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
     echo ""
     read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
@@ -310,7 +307,7 @@ EOF
     echo ""
     echo -e "${BGREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
     echo ""
-    echo -e "${BCYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
+    echo -e "${CYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
     cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -342,7 +339,7 @@ SERVICE_EOF
 
 run_wings_foreground() {
     echo ""
-    echo -e "${BCYAN}>>> Running Wings in terminal (foreground)...${NC}"
+    echo -e "${CYAN}>>> Running Wings in terminal (foreground)...${NC}"
     echo -e "${BYELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop Wings.${NC}"
     echo ""
     sleep 1
@@ -357,7 +354,7 @@ run_wings_background() {
         pause
         return
     fi
-    echo -e "${BCYAN}>>> Starting Wings in background via systemd...${NC}"
+    echo -e "${CYAN}>>> Starting Wings in background via systemd...${NC}"
     systemctl enable --now wings
     systemctl status wings --no-pager
     echo ""
@@ -369,10 +366,10 @@ run_wings_background() {
 run_wings_menu() {
     while true; do
         banner
-        echo -e "${BMAGENTA}${BOLD}--- Run Wings ---${NC}"
-        echo -e "  ${GREEN}1)${NC} Run in terminal (foreground)"
-        echo -e "  ${GREEN}2)${NC} Run in background (systemd)"
-        echo -e "  ${GREEN}3)${NC} Exit"
+        echo -e "${BRED}${BOLD}--- Run Wings ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Run in terminal (foreground)"
+        echo -e "  ${CYAN}2)${NC} Run in background (systemd)"
+        echo -e "  ${CYAN}3)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" run_choice
 
@@ -388,11 +385,11 @@ run_wings_menu() {
 wings_setup_menu() {
     while true; do
         banner
-        echo -e "${BMAGENTA}${BOLD}--- Wings Setup ---${NC}"
-        echo -e "  ${GREEN}1)${NC} Wings install + docker + fix"
-        echo -e "  ${GREEN}2)${NC} Wings config setup"
-        echo -e "  ${GREEN}3)${NC} Run Wings"
-        echo -e "  ${GREEN}4)${NC} Exit"
+        echo -e "${BRED}${BOLD}--- Wings Setup ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Wings install + docker + fix"
+        echo -e "  ${CYAN}2)${NC} Wings config setup"
+        echo -e "  ${CYAN}3)${NC} Run Wings"
+        echo -e "  ${CYAN}4)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" wings_choice
 
@@ -411,7 +408,7 @@ wings_setup_menu() {
 # ============================================================
 run_system_spec() {
     banner
-    echo -e "${BMAGENTA}${BOLD}--- System Spec ---${NC}"
+    echo -e "${BRED}${BOLD}--- System Spec ---${NC}"
     echo ""
 
     # ---- CPU model ----
@@ -485,9 +482,9 @@ run_system_spec() {
 # ============================================================
 show_menu() {
     banner
-    echo -e "  ${GREEN}1)${NC} Pterodactyl Panel Setup"
-    echo -e "  ${GREEN}2)${NC} Wings Setup"
-    echo -e "  ${GREEN}4)${NC} System Spec"
+    echo -e "  ${CYAN}1)${NC} Pterodactyl Panel Setup"
+    echo -e "  ${CYAN}2)${NC} Wings Setup"
+    echo -e "  ${CYAN}4)${NC} System Spec"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
