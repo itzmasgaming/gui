@@ -484,7 +484,7 @@ show_menu() {
     banner
     echo -e "  ${CYAN}1)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}2)${NC} Wings Setup"
-    echo -e "  ${CYAN}4)${NC} System Spec"
+    echo -e "  ${CYAN}3)${NC} System Spec"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
@@ -492,7 +492,7 @@ show_menu() {
     case "$choice" in
         1) panel_setup_menu ;;
         2) wings_setup_menu ;;
-        4) run_system_spec ;;
+        3) run_system_spec ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
