@@ -19,11 +19,8 @@ NC='\033[0m' # No Color
 # ---- Panel config ----
 CFG_TIMEZONE="Asia/Kolkata"
 CFG_EMAIL="ItzMASGaming@gmail.com"        # LE / panel email
-CFG_ADMIN_EMAIL="itzmasgaming@gmail.com"
-CFG_ADMIN_USERNAME="Itzmasgaming"
-CFG_ADMIN_FIRSTNAME="itzmas"
-CFG_ADMIN_LASTNAME="gaming"
-CFG_ADMIN_PASSWORD="000000"
+CFG_ADMIN_FIRSTNAME="Admin"
+CFG_ADMIN_LASTNAME="User"
 CFG_FQDN="cold-rabbit-94.telebit.io"
 
 CFG_DB_NAME=""
@@ -120,7 +117,24 @@ $CFG_ASSUME_SSL
 EOF
 }
 
+prompt_admin_details() {
+    echo ""
+    echo -e "${CYAN}>>> Enter Panel admin account details${NC}"
+    read -rp "$(echo -e ${YELLOW}"Admin email: "${NC})" CFG_ADMIN_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin username: "${NC})" CFG_ADMIN_USERNAME
+    read -srp "$(echo -e ${YELLOW}"Admin password: "${NC})" CFG_ADMIN_PASSWORD
+    echo ""
+
+    if [ -z "$CFG_ADMIN_EMAIL" ] || [ -z "$CFG_ADMIN_USERNAME" ] || [ -z "$CFG_ADMIN_PASSWORD" ]; then
+        echo -e "${RED}Email, username, and password are all required. Aborting.${NC}"
+        pause
+        return 1
+    fi
+    return 0
+}
+
 run_install() {
+    prompt_admin_details || return
     echo ""
     echo -e "${GREEN}>>> Starting fresh Pterodactyl Panel install...${NC}"
     echo ""
@@ -129,6 +143,7 @@ run_install() {
 }
 
 run_reinstall() {
+    prompt_admin_details || return
     echo ""
     echo -e "${YELLOW}>>> Reinstalling Pterodactyl Panel (will confirm overwrite)...${NC}"
     echo ""
@@ -274,6 +289,32 @@ EOF
 
     echo ""
     echo -e "${GREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
+    echo ""
+    echo -e "${CYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
+    cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
+[Unit]
+Description=Pterodactyl Wings Daemon
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=root
+WorkingDirectory=/etc/pterodactyl
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    systemctl daemon-reload
+
     echo ""
     echo -e "${CYAN}>>> Enabling and starting wings...${NC}"
     systemctl enable --now wings
