@@ -725,8 +725,11 @@ install_blueprint_extension() {
     local name="$1"
     local url="$2"
     local identifier="$3"
-    local filename
-    filename="$(basename "$url")"
+    # Blueprint's CLI looks for a file literally named "<identifier>.blueprint"
+    # in the current directory - it does NOT care what the remote URL's
+    # filename was. Force it to the correct name here so this never breaks
+    # again regardless of how the source file is named upstream.
+    local filename="${identifier}.blueprint"
 
     if [ ! -d "$PTERODACTYL_DIR_DEFAULT" ]; then
         echo -e "${BRED}Pterodactyl doesn't look installed at ${PTERODACTYL_DIR_DEFAULT}.${NC}"
@@ -743,6 +746,15 @@ install_blueprint_extension() {
     echo -e "${CYAN}>>> Downloading ${name}...${NC}"
     if ! wget -q --show-progress "$url" -O "${PTERODACTYL_DIR_DEFAULT}/${filename}"; then
         echo -e "${BRED}Download failed. Check network/URL and try again.${NC}"
+        pause
+        return 1
+    fi
+
+    # Sanity check: make sure we actually got a zip/blueprint archive and
+    # not an HTML error page (common when a raw URL 404s or redirects).
+    if ! file "${PTERODACTYL_DIR_DEFAULT}/${filename}" | grep -qi "zip"; then
+        echo -e "${BRED}Downloaded file doesn't look like a valid .blueprint archive (got HTML/error page instead). Check the URL.${NC}"
+        rm -f "${PTERODACTYL_DIR_DEFAULT}/${filename}"
         pause
         return 1
     fi
