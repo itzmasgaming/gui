@@ -497,6 +497,18 @@ run_system_spec() {
 }
 
 # ============================================================
+# CREDITS
+# ============================================================
+show_credits() {
+    banner
+    echo -e "${BRED}${BOLD}--- Credits ---${NC}"
+    echo ""
+    echo -e "${RED}Docker and Wings fixers given by:${NC} Xorvila Team Dev"
+    echo -e "${RED}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ItzMASGaming"
+    pause
+}
+
+# ============================================================
 # MAIN MENU
 # ============================================================
 show_menu() {
@@ -505,6 +517,7 @@ show_menu() {
     echo -e "  ${RED}2)${NC} Pterodactyl Panel Setup"
     echo -e "  ${RED}3)${NC} Wings Setup"
     echo -e "  ${RED}4)${NC} System Spec"
+    echo -e "  ${RED}5)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${RED}"Select an option: "${NC})" choice
@@ -514,6 +527,7 @@ show_menu() {
         2) panel_setup_menu ;;
         3) wings_setup_menu ;;
         4) run_system_spec ;;
+        5) show_credits ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
