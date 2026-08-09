@@ -778,8 +778,12 @@ run_installed_apps() {
     # ---- Cloudflare ----
     if command -v cloudflared >/dev/null 2>&1; then
         cf_status="Not running"
-        [ -f /etc/systemd/system/cloudflared.service ] && cf_status=$(systemctl is-active cloudflared 2>/dev/null)
-        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${cf_status:-Not running}${NC}"
+        if [ -f /etc/systemd/system/cloudflared.service ] && [ "$(systemctl is-active cloudflared 2>/dev/null)" = "active" ]; then
+            cf_status="active (systemd)"
+        elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
+            cf_status="active (process)"
+        fi
+        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${cf_status}${NC}"
     else
         echo -e "${WHITE}Cloudflare:${NC} ${BRED}Not installed${NC}"
     fi
@@ -802,8 +806,12 @@ run_installed_apps() {
     # ---- Wings ----
     if [ -f /usr/local/bin/wings ]; then
         wings_status="Not running"
-        [ -f /etc/systemd/system/wings.service ] && wings_status=$(systemctl is-active wings 2>/dev/null)
-        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${wings_status:-Not running}${NC}"
+        if [ -f /etc/systemd/system/wings.service ] && [ "$(systemctl is-active wings 2>/dev/null)" = "active" ]; then
+            wings_status="active (systemd)"
+        elif pgrep -x "wings" >/dev/null 2>&1; then
+            wings_status="active (process)"
+        fi
+        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${wings_status}${NC}"
     else
         echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
     fi
