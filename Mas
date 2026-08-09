@@ -703,52 +703,113 @@ EOF
     pause
 }
 
-run_themes_and_extensions() {
-    banner
-    echo -e "${CYAN}${BOLD}--- Themes & Extensions Installer ---${NC}"
+run_theme_nebula() {
     echo ""
-    echo -e "${YELLOW}>>> Note: this runs a third-party script not written by this tool.${NC}"
-    echo -e "${YELLOW}>>> Review it yourself if you want to verify what it does: ${NC}"
-    echo -e "    https://raw.githubusercontent.com/nobita329/The-Coding-Hub/refs/heads/main/srv/thame/chang.sh"
-    echo ""
-    echo -e "${CYAN}>>> Fetching and running Themes + Extensions installer...${NC}"
-    bash <(curl -s https://raw.githubusercontent.com/nobita329/The-Coding-Hub/refs/heads/main/srv/thame/chang.sh)
-    pause
+    echo -e "${CYAN}>>> Nebula auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/nebula.blueprint
+    yes "" | blueprint -i nebula
+    rm -f nebula.blueprint
+
+    echo -e "${BGREEN}>>> Nebula installed!${NC}"
+    sleep 2
 }
 
-run_nebula_theme() {
-    banner
-    echo -e "${CYAN}${BOLD}--- Nebula Theme Install ---${NC}"
+run_theme_euphoria() {
     echo ""
+    echo -e "${CYAN}>>> Euphoria auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
 
-    local nebula_file="${PTERODACTYL_DIR}/nebulaa.blueprint"
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/euphoriatheme.blueprint
+    blueprint -i euphoriatheme
+    rm -f euphoriatheme.blueprint
 
-    if [ ! -f "$nebula_file" ]; then
-        echo -e "${BRED}nebulaa.blueprint not found at ${nebula_file}${NC}"
+    echo -e "${BGREEN}>>> Euphoria installed!${NC}"
+    sleep 2
+}
+
+run_theme_add_tool() {
+    echo ""
+    echo -e "${CYAN}>>> Add Tool auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/versionchanger.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/mcplugins.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/sagaminecraftplayermanager.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/huxregister.blueprint
+    blueprint -i versionchanger
+    blueprint -i mcplugins
+    blueprint -i sagaminecraftplayermanager
+    blueprint -i huxregister.blueprint
+    rm -f versionchanger.blueprint mcplugins.blueprint sagaminecraftplayermanager.blueprint huxregister.blueprint
+
+    echo -e "${BGREEN}>>> Add Tool package installed!${NC}"
+    sleep 2
+}
+
+theme_uninstall_menu() {
+    while true; do
+        banner
+        echo -e "${CYAN}${BOLD}--- Uninstall Menu ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Remove Nebula"
+        echo -e "  ${CYAN}2)${NC} Remove Euphoria"
+        echo -e "  ${CYAN}3)${NC} Remove Add Tool Package"
+        echo -e "  ${BRED}0)${NC} Back"
         echo ""
-        echo -e "${YELLOW}Upload the file there first, e.g. from your own machine:${NC}"
-        echo -e "    scp nebulaa.blueprint root@your-server-ip:${nebula_file}"
-        pause
-        return
-    fi
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" uopt
 
-    if ! command -v blueprint >/dev/null 2>&1; then
-        echo -e "${BRED}Blueprint CLI not found. Run 'Blueprint install (fixed)' first.${NC}"
-        pause
-        return
-    fi
+        case "$uopt" in
+            1)
+                echo -e "${CYAN}>>> Removing Nebula...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r nebula
+                echo -e "${BGREEN}>>> Nebula removed!${NC}"
+                sleep 2
+                ;;
+            2)
+                echo -e "${CYAN}>>> Removing Euphoria...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r euphoriatheme
+                echo -e "${BGREEN}>>> Euphoria removed!${NC}"
+                sleep 2
+                ;;
+            3)
+                echo -e "${CYAN}>>> Removing Add Tool package...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r versionchanger
+                blueprint -r mcplugins
+                blueprint -r sagaminecraftplayermanager
+                echo -e "${BGREEN}>>> Add Tool package removed!${NC}"
+                sleep 2
+                ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
 
-    echo -e "${CYAN}>>> Installing Nebula theme via Blueprint CLI...${NC}"
-    cd "$PTERODACTYL_DIR"
-    blueprint -install nebulaa.blueprint
+theme_installer_menu() {
+    while true; do
+        banner
+        echo -e "${CYAN}${BOLD}--- Themes & Extensions Installer ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Nebula (Auto Install)"
+        echo -e "  ${CYAN}2)${NC} Euphoria (Auto Install)"
+        echo -e "  ${CYAN}3)${NC} Uninstall"
+        echo -e "  ${CYAN}4)${NC} Add Tool (Auto Install)"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
 
-    echo ""
-    echo -e "${CYAN}>>> Running blueprint -upgrade to finalize...${NC}"
-    blueprint -upgrade
-
-    echo ""
-    echo -e "${BGREEN}>>> Nebula theme install complete. Hard-refresh your panel to see it.${NC}"
-    pause
+        case "$theme_choice" in
+            1) run_theme_nebula ;;
+            2) run_theme_euphoria ;;
+            3) theme_uninstall_menu ;;
+            4) run_theme_add_tool ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 blueprint_menu() {
@@ -757,15 +818,13 @@ blueprint_menu() {
         echo -e "${CYAN}${BOLD}--- Blueprint & Themes ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
         echo -e "  ${CYAN}2)${NC} Themes + Extensions Installer"
-        echo -e "  ${CYAN}3)${NC} Nebula Theme (install)"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
 
         case "$bp_choice" in
             1) run_blueprint_install ;;
-            2) run_themes_and_extensions ;;
-            3) run_nebula_theme ;;
+            2) theme_installer_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -849,6 +908,7 @@ show_credits() {
     echo ""
     echo -e "${WHITE}Docker and Wings fixers given by:${NC} ${YELLOW}Xorvila Team Dev${NC}"
     echo -e "${WHITE}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ${YELLOW}ItzMASGaming${NC}"
+    echo -e "${WHITE}Blueprint themes provided by:${NC} ${YELLOW}Jishnu/The-Coding-Hub${NC}"
     pause
 }
 
