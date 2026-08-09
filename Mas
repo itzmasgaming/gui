@@ -501,10 +501,10 @@ run_system_spec() {
 # ============================================================
 show_menu() {
     banner
-    echo -e "  ${RED}1)${NC} Sys Update"
-    echo -e "  ${RED}2)${NC} Pterodactyl Setup"
+    echo -e "  ${RED}1)${NC} System Update"
+    echo -e "  ${RED}2)${NC} Pterodactyl Panel Setup"
     echo -e "  ${RED}3)${NC} Wings Setup"
-    echo -e "  ${RED}4)${NC} Sys Spec"
+    echo -e "  ${RED}4)${NC} System Spec"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${RED}"Select an option: "${NC})" choice
