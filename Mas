@@ -713,12 +713,65 @@ EOF
     pause
 }
 
-run_blueprint_theme_1() {
-    banner
-    echo -e "${CYAN}${BOLD}--- Blueprint Theme 1 ---${NC}"
+PTERODACTYL_DIR_DEFAULT="/var/www/pterodactyl"
+
+# ------------------------------------------------------------
+# Generic helper: download + install any Blueprint .blueprint
+# theme/extension file given its download URL and identifier
+# (identifier = the string used by `blueprint -i <identifier>`,
+# found in the theme's conf.yml).
+# ------------------------------------------------------------
+install_blueprint_extension() {
+    local name="$1"
+    local url="$2"
+    local identifier="$3"
+    local filename
+    filename="$(basename "$url")"
+
+    if [ ! -d "$PTERODACTYL_DIR_DEFAULT" ]; then
+        echo -e "${BRED}Pterodactyl doesn't look installed at ${PTERODACTYL_DIR_DEFAULT}.${NC}"
+        pause
+        return 1
+    fi
+
+    if ! command -v blueprint >/dev/null 2>&1 && [ ! -f "${PTERODACTYL_DIR_DEFAULT}/blueprint.sh" ]; then
+        echo -e "${BRED}Blueprint isn't installed yet. Run 'Blueprint install (fixed)' first.${NC}"
+        pause
+        return 1
+    fi
+
+    echo -e "${CYAN}>>> Downloading ${name}...${NC}"
+    if ! wget -q --show-progress "$url" -O "${PTERODACTYL_DIR_DEFAULT}/${filename}"; then
+        echo -e "${BRED}Download failed. Check network/URL and try again.${NC}"
+        pause
+        return 1
+    fi
+
+    cd "$PTERODACTYL_DIR_DEFAULT" || { echo -e "${BRED}Could not cd into ${PTERODACTYL_DIR_DEFAULT}${NC}"; pause; return 1; }
+
+    echo -e "${CYAN}>>> Installing ${name} via Blueprint...${NC}"
+    export NODE_OPTIONS=--openssl-legacy-provider
+    if command -v blueprint >/dev/null 2>&1; then
+        blueprint -i "$identifier"
+    else
+        ./blueprint.sh -i "$identifier"
+    fi
+
     echo ""
-    echo -e "${YELLOW}Under Dev${NC}"
+    echo -e "${BGREEN}>>> ${name} installed. Configure it under admin > extensions > ${identifier} in your panel.${NC}"
     pause
+}
+
+run_blueprint_theme_abysspurple() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Abyss Purple Theme ---${NC}"
+    echo ""
+    echo -e "${WHITE}Free, MIT-licensed Blueprint theme by fernsehheft (glassmorphism / deep-space purple).${NC}"
+    echo ""
+    install_blueprint_extension \
+        "Nebula" \
+        "https://github.com/itzmasgaming-code/itzmasgaming-codehub/blob/main/nebulaa.blueprint" \
+        "abysspurple"
 }
 
 run_blueprint_theme_2() {
@@ -732,15 +785,15 @@ run_blueprint_theme_2() {
 blueprint_theme_menu() {
     while true; do
         banner
-        echo -e "${CYAN}${BOLD}--- Blueprint Theme (cracked) ---${NC}"
-        echo -e "  ${CYAN}1)${NC} Theme 1"
+        echo -e "${CYAN}${BOLD}--- Blueprint Themes ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Abyss Purple (free)"
         echo -e "  ${CYAN}2)${NC} Theme 2"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
 
         case "$theme_choice" in
-            1) run_blueprint_theme_1 ;;
+            1) run_blueprint_theme_abysspurple ;;
             2) run_blueprint_theme_2 ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
@@ -753,7 +806,7 @@ blueprint_menu() {
         banner
         echo -e "${CYAN}${BOLD}--- Blueprint ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
-        echo -e "  ${CYAN}2)${NC} Blueprint Theme (cracked)"
+        echo -e "  ${CYAN}2)${NC} Blueprint Themes"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
@@ -863,7 +916,7 @@ show_menu() {
     echo -e "  ${CYAN}3)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}4)${NC} Wings Setup"
     echo -e "  ${CYAN}5)${NC} System Spec"
-    echo -e "  ${CYAN}6)${NC} Blueprint + Themes (Fixed)"
+    echo -e "  ${CYAN}6)${NC} Blueprint + Themes"
     echo -e "  ${CYAN}7)${NC} Installed Apps"
     echo -e "  ${CYAN}8)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
