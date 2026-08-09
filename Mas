@@ -79,6 +79,90 @@ check_root() {
 }
 
 # ============================================================
+# CLOUDFLARE
+# ============================================================
+run_cloudflare_foreground() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
+        pause
+        return
+    fi
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
+    if [ -z "$cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting.${NC}"
+        pause
+        return
+    fi
+    echo ""
+    echo -e "${CYAN}>>> Running Cloudflare tunnel in terminal (foreground)...${NC}"
+    echo -e "${YELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop the tunnel.${NC}"
+    echo ""
+    sleep 1
+    cloudflared tunnel run --protocol http2 --token "$cf_token"
+    pause
+}
+
+run_cloudflare_background() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
+        pause
+        return
+    fi
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
+    if [ -z "$cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}>>> Creating cloudflared.service...${NC}"
+    cat <<SERVICE_EOF > /etc/systemd/system/cloudflared.service
+[Unit]
+Description=Cloudflare Tunnel
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/cloudflared tunnel run --protocol http2 --token $cf_token
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    systemctl daemon-reload
+    systemctl enable --now cloudflared
+    systemctl status cloudflared --no-pager
+
+    echo ""
+    echo -e "${CYAN}>>> Cloudflare tunnel running in background. Check logs anytime with:${NC}"
+    echo -e "    ${YELLOW}journalctl -u cloudflared -f${NC}"
+    pause
+}
+
+cloudflare_menu() {
+    while true; do
+        banner
+        echo -e "${CYAN}${BOLD}--- Cloudflare ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Run in terminal (foreground)"
+        echo -e "  ${CYAN}2)${NC} Run in background (systemd)"
+        echo -e "  ${CYAN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" cf_choice
+
+        case "$cf_choice" in
+            1) run_cloudflare_foreground ;;
+            2) run_cloudflare_background ;;
+            3) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
 # PANEL - build answer sequences
 # ============================================================
 build_answers_fresh_install() {
@@ -691,9 +775,18 @@ run_installed_apps() {
     echo -e "${CYAN}${BOLD}--- Installed Apps ---${NC}"
     echo ""
 
+    # ---- Cloudflare ----
+    if command -v cloudflared >/dev/null 2>&1; then
+        cf_status="Not running"
+        [ -f /etc/systemd/system/cloudflared.service ] && cf_status=$(systemctl is-active cloudflared 2>/dev/null)
+        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${cf_status:-Not running}${NC}"
+    else
+        echo -e "${WHITE}Cloudflare:${NC} ${BRED}Not installed${NC}"
+    fi
+
     # ---- Pterodactyl Panel ----
     if [ -f /var/www/pterodactyl/artisan ]; then
-        echo -e "${WHITE}Pterodactyl Panel:${NC} ${YELLOW}Installed${NC} (/var/www/pterodactyl)"
+        echo -e "${WHITE}Pterodactyl Panel:${NC} ${YELLOW}Installed${NC}"
     else
         echo -e "${WHITE}Pterodactyl Panel:${NC} ${BRED}Not installed${NC}"
     fi
@@ -701,30 +794,30 @@ run_installed_apps() {
     # ---- Docker ----
     if command -v docker >/dev/null 2>&1; then
         docker_status=$(systemctl is-active docker 2>/dev/null)
-        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} ($(docker --version 2>/dev/null | cut -d',' -f1)) - Service: ${YELLOW}${docker_status:-unknown}${NC}"
+        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${docker_status:-Not running}${NC}"
     else
         echo -e "${WHITE}Docker:${NC} ${BRED}Not installed${NC}"
     fi
 
     # ---- Wings ----
     if [ -f /usr/local/bin/wings ]; then
-        wings_status="not running"
+        wings_status="Not running"
         [ -f /etc/systemd/system/wings.service ] && wings_status=$(systemctl is-active wings 2>/dev/null)
-        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} (/usr/local/bin/wings) - Service: ${YELLOW}${wings_status:-unknown}${NC}"
+        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${wings_status:-Not running}${NC}"
     else
         echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
     fi
 
     # ---- Wings config ----
     if [ -f /etc/pterodactyl/config.yml ]; then
-        echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC} (/etc/pterodactyl/config.yml)"
+        echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC}"
     else
         echo -e "${WHITE}Wings config:${NC} ${BRED}Not found${NC}"
     fi
 
     # ---- Blueprint ----
     if [ -d /var/www/pterodactyl/.blueprint ]; then
-        echo -e "${WHITE}Blueprint:${NC} ${YELLOW}Installed${NC} (/var/www/pterodactyl/.blueprint)"
+        echo -e "${WHITE}Blueprint:${NC} ${YELLOW}Installed${NC}"
     else
         echo -e "${WHITE}Blueprint:${NC} ${BRED}Not installed${NC}"
     fi
