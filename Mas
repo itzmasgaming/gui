@@ -606,7 +606,129 @@ EOF
     /var/www/pterodactyl/master_fix.sh
 
     echo ""
+    echo -e "${CYAN}>>> Running Blueprint's official installer (registers extension in DB)...${NC}"
+    export NODE_OPTIONS=--openssl-legacy-provider
+
+    # Pre-create debug log path so blueprint.sh doesn't spam "No such file" errors
+    mkdir -p /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug
+    touch /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug/logs.txt
+
+    chmod +x /var/www/pterodactyl/blueprint.sh
+    # Auto-answer the "put into maintenance mode?" prompt with y
+    echo "y" | /var/www/pterodactyl/blueprint.sh
+
+    echo ""
+    echo -e "${CYAN}>>> Fixing blueprint CLI shortcut permissions...${NC}"
+    chmod +x /usr/local/bin/blueprint 2>/dev/null
+
+    echo -e "${CYAN}>>> Running blueprint -upgrade...${NC}"
+    blueprint -upgrade
+
+    echo ""
     echo -e "${CYAN}>>> Blueprint install + repair complete.${NC}"
+    pause
+}
+
+run_blueprint_theme_1() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Blueprint Theme 1 ---${NC}"
+    echo ""
+    echo -e "${YELLOW}Under Dev${NC}"
+    pause
+}
+
+run_blueprint_theme_2() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Blueprint Theme 2 ---${NC}"
+    echo ""
+    echo -e "${YELLOW}Under Dev${NC}"
+    pause
+}
+
+blueprint_theme_menu() {
+    while true; do
+        banner
+        echo -e "${CYAN}${BOLD}--- Blueprint Theme (cracked) ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Theme 1"
+        echo -e "  ${CYAN}2)${NC} Theme 2"
+        echo -e "  ${CYAN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
+
+        case "$theme_choice" in
+            1) run_blueprint_theme_1 ;;
+            2) run_blueprint_theme_2 ;;
+            3) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+blueprint_menu() {
+    while true; do
+        banner
+        echo -e "${CYAN}${BOLD}--- Blueprint ---${NC}"
+        echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
+        echo -e "  ${CYAN}2)${NC} Blueprint Theme (cracked)"
+        echo -e "  ${CYAN}3)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
+
+        case "$bp_choice" in
+            1) run_blueprint_install ;;
+            2) blueprint_theme_menu ;;
+            3) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# INSTALLED APPS
+# ============================================================
+run_installed_apps() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Installed Apps ---${NC}"
+    echo ""
+
+    # ---- Pterodactyl Panel ----
+    if [ -f /var/www/pterodactyl/artisan ]; then
+        echo -e "${WHITE}Pterodactyl Panel:${NC} ${YELLOW}Installed${NC} (/var/www/pterodactyl)"
+    else
+        echo -e "${WHITE}Pterodactyl Panel:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    # ---- Docker ----
+    if command -v docker >/dev/null 2>&1; then
+        docker_status=$(systemctl is-active docker 2>/dev/null)
+        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} ($(docker --version 2>/dev/null | cut -d',' -f1)) - Service: ${YELLOW}${docker_status:-unknown}${NC}"
+    else
+        echo -e "${WHITE}Docker:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    # ---- Wings ----
+    if [ -f /usr/local/bin/wings ]; then
+        wings_status="not running"
+        [ -f /etc/systemd/system/wings.service ] && wings_status=$(systemctl is-active wings 2>/dev/null)
+        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} (/usr/local/bin/wings) - Service: ${YELLOW}${wings_status:-unknown}${NC}"
+    else
+        echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    # ---- Wings config ----
+    if [ -f /etc/pterodactyl/config.yml ]; then
+        echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC} (/etc/pterodactyl/config.yml)"
+    else
+        echo -e "${WHITE}Wings config:${NC} ${BRED}Not found${NC}"
+    fi
+
+    # ---- Blueprint ----
+    if [ -d /var/www/pterodactyl/.blueprint ]; then
+        echo -e "${WHITE}Blueprint:${NC} ${YELLOW}Installed${NC} (/var/www/pterodactyl/.blueprint)"
+    else
+        echo -e "${WHITE}Blueprint:${NC} ${BRED}Not installed${NC}"
+    fi
+
     pause
 }
 
@@ -632,7 +754,8 @@ show_menu() {
     echo -e "  ${CYAN}3)${NC} Wings Setup"
     echo -e "  ${CYAN}4)${NC} System Spec"
     echo -e "  ${CYAN}5)${NC} Blueprint"
-    echo -e "  ${CYAN}6)${NC} Credits"
+    echo -e "  ${CYAN}6)${NC} Installed Apps"
+    echo -e "  ${CYAN}7)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
@@ -642,8 +765,9 @@ show_menu() {
         2) panel_setup_menu ;;
         3) wings_setup_menu ;;
         4) run_system_spec ;;
-        5) run_blueprint_install ;;
-        6) show_credits ;;
+        5) blueprint_menu ;;
+        6) run_installed_apps ;;
+        7) show_credits ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
