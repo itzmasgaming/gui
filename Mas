@@ -60,7 +60,7 @@ banner() {
     tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
     echo -e "${BRED}${tag}${NC}"
 
-    echo -e "${RED}${BOLD}"
+    echo -e "${BRED}${BOLD}"
     echo "============================================"
     echo "                MAS Gui"
     echo "============================================"
@@ -138,7 +138,7 @@ EOF
 
 prompt_admin_details() {
     echo ""
-    echo -e "${RED}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
+    echo -e "${CYAN}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
     read -rp "$(echo -e ${YELLOW}"Let's Encrypt / Panel email [default: admin@gmail.com]: "${NC})" CFG_EMAIL
     read -rp "$(echo -e ${YELLOW}"Admin email [default: admin@admin.com]: "${NC})" CFG_ADMIN_EMAIL
     read -rp "$(echo -e ${YELLOW}"Admin username [default: admin]: "${NC})" CFG_ADMIN_USERNAME
@@ -175,11 +175,11 @@ panel_setup_menu() {
     while true; do
         banner
         echo -e "${BRED}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
-        echo -e "  ${RED}1)${NC} Pterodactyl install"
-        echo -e "  ${RED}2)${NC} Pterodactyl reinstall"
-        echo -e "  ${RED}3)${NC} Exit"
+        echo -e "  ${CYAN}1)${NC} Pterodactyl install"
+        echo -e "  ${CYAN}2)${NC} Pterodactyl reinstall"
+        echo -e "  ${CYAN}3)${NC} Exit"
         echo ""
-        read -rp "$(echo -e ${RED}"Select an option: "${NC})" sub_choice
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" sub_choice
 
         case "$sub_choice" in
             1) run_install ;;
@@ -263,7 +263,7 @@ EOF
 # ============================================================
 run_wings_config() {
     echo ""
-    echo -e "${RED}>>> Wings Config Setup${NC}"
+    echo -e "${CYAN}>>> Wings Config Setup${NC}"
     echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
     echo ""
     read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
@@ -310,7 +310,7 @@ EOF
     echo ""
     echo -e "${BGREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
     echo ""
-    echo -e "${RED}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
+    echo -e "${CYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
     cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -342,7 +342,7 @@ SERVICE_EOF
 
 run_wings_foreground() {
     echo ""
-    echo -e "${RED}>>> Running Wings in terminal (foreground)...${NC}"
+    echo -e "${CYAN}>>> Running Wings in terminal (foreground)...${NC}"
     echo -e "${BYELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop Wings.${NC}"
     echo ""
     sleep 1
@@ -357,7 +357,7 @@ run_wings_background() {
         pause
         return
     fi
-    echo -e "${RED}>>> Starting Wings in background via systemd...${NC}"
+    echo -e "${CYAN}>>> Starting Wings in background via systemd...${NC}"
     systemctl enable --now wings
     systemctl status wings --no-pager
     echo ""
@@ -370,11 +370,11 @@ run_wings_menu() {
     while true; do
         banner
         echo -e "${BRED}${BOLD}--- Run Wings ---${NC}"
-        echo -e "  ${RED}1)${NC} Run in terminal (foreground)"
-        echo -e "  ${RED}2)${NC} Run in background (systemd)"
-        echo -e "  ${RED}3)${NC} Exit"
+        echo -e "  ${CYAN}1)${NC} Run in terminal (foreground)"
+        echo -e "  ${CYAN}2)${NC} Run in background (systemd)"
+        echo -e "  ${CYAN}3)${NC} Exit"
         echo ""
-        read -rp "$(echo -e ${RED}"Select an option: "${NC})" run_choice
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" run_choice
 
         case "$run_choice" in
             1) run_wings_foreground ;;
@@ -389,12 +389,12 @@ wings_setup_menu() {
     while true; do
         banner
         echo -e "${BRED}${BOLD}--- Wings Setup ---${NC}"
-        echo -e "  ${RED}1)${NC} Wings install + docker + fix"
-        echo -e "  ${RED}2)${NC} Wings config setup"
-        echo -e "  ${RED}3)${NC} Run Wings"
-        echo -e "  ${RED}4)${NC} Exit"
+        echo -e "  ${CYAN}1)${NC} Wings install + docker + fix"
+        echo -e "  ${CYAN}2)${NC} Wings config setup"
+        echo -e "  ${CYAN}3)${NC} Run Wings"
+        echo -e "  ${CYAN}4)${NC} Exit"
         echo ""
-        read -rp "$(echo -e ${RED}"Select an option: "${NC})" wings_choice
+        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" wings_choice
 
         case "$wings_choice" in
             1) run_wings_install_docker_fix ;;
@@ -413,10 +413,10 @@ run_system_update() {
     banner
     echo -e "${BRED}${BOLD}--- System Update ---${NC}"
     echo ""
-    echo -e "${RED}>>> Running apt update...${NC}"
+    echo -e "${CYAN}>>> Running apt update...${NC}"
     apt update
     echo ""
-    echo -e "${RED}>>> Running apt upgrade -y...${NC}"
+    echo -e "${CYAN}>>> Running apt upgrade -y...${NC}"
     apt upgrade -y
     echo ""
     echo -e "${BRED}>>> System update complete.${NC}"
@@ -478,21 +478,21 @@ run_system_spec() {
         runtime_info="${up_seconds}s"
     fi
 
-    echo -e "${RED}CPU Model:${NC}        $cpu_model"
-    echo -e "${RED}Cores/Threads:${NC}    $thread_count"
-    echo -e "${RED}Core/Thread Range:${NC} $core_range  ${YELLOW}(as allowed by Docker cgroup)${NC}"
+    echo -e "${CYAN}CPU Model:${NC}        $cpu_model"
+    echo -e "${CYAN}Cores/Threads:${NC}    $thread_count"
+    echo -e "${CYAN}Core/Thread Range:${NC} $core_range  ${YELLOW}(as allowed by Docker cgroup)${NC}"
     echo ""
-    echo -e "${RED}RAM Total:${NC}        ${mem_total_gb} GB"
-    echo -e "${RED}RAM Used:${NC}         ${mem_used_gb} GB"
-    echo -e "${RED}RAM Available:${NC}    ${mem_avail_gb} GB"
+    echo -e "${CYAN}RAM Total:${NC}        ${mem_total_gb} GB"
+    echo -e "${CYAN}RAM Used:${NC}         ${mem_used_gb} GB"
+    echo -e "${CYAN}RAM Available:${NC}    ${mem_avail_gb} GB"
     echo ""
-    echo -e "${RED}Storage Total:${NC}    ${storage_total_gb} GB"
-    echo -e "${RED}Storage Used:${NC}     ${storage_used_gb} GB"
-    echo -e "${RED}Storage Available:${NC} ${storage_avail_gb} GB"
+    echo -e "${CYAN}Storage Total:${NC}    ${storage_total_gb} GB"
+    echo -e "${CYAN}Storage Used:${NC}     ${storage_used_gb} GB"
+    echo -e "${CYAN}Storage Available:${NC} ${storage_avail_gb} GB"
     echo ""
-    echo -e "${RED}GPU:${NC}              $gpu_info"
+    echo -e "${CYAN}GPU:${NC}              $gpu_info"
     echo ""
-    echo -e "${RED}Uptime:${NC}           $runtime_info"
+    echo -e "${CYAN}Uptime:${NC}           $runtime_info"
 
     pause
 }
@@ -514,14 +514,14 @@ show_credits() {
 # ============================================================
 show_menu() {
     banner
-    echo -e "  ${RED}1)${NC} System Update"
-    echo -e "  ${RED}2)${NC} Pterodactyl Panel Setup"
-    echo -e "  ${RED}3)${NC} Wings Setup"
-    echo -e "  ${RED}4)${NC} System Spec"
-    echo -e "  ${RED}5)${NC} Credits"
+    echo -e "  ${CYAN}1)${NC} System Update"
+    echo -e "  ${CYAN}2)${NC} Pterodactyl Panel Setup"
+    echo -e "  ${CYAN}3)${NC} Wings Setup"
+    echo -e "  ${CYAN}4)${NC} System Spec"
+    echo -e "  ${CYAN}5)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
-    read -rp "$(echo -e ${RED}"Select an option: "${NC})" choice
+    read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
 
     case "$choice" in
         1) run_system_update ;;
