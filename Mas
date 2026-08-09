@@ -149,14 +149,14 @@ cloudflare_menu() {
         echo -e "${CYAN}${BOLD}--- Cloudflare ---${NC}"
         echo -e "  ${CYAN}1)${NC} Run in terminal (foreground)"
         echo -e "  ${CYAN}2)${NC} Run in background (systemd)"
-        echo -e "  ${CYAN}3)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" cf_choice
 
         case "$cf_choice" in
             1) run_cloudflare_foreground ;;
             2) run_cloudflare_background ;;
-            3) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -260,14 +260,14 @@ panel_setup_menu() {
         echo -e "${BRED}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
         echo -e "  ${CYAN}1)${NC} Pterodactyl install"
         echo -e "  ${CYAN}2)${NC} Pterodactyl reinstall"
-        echo -e "  ${CYAN}3)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" sub_choice
 
         case "$sub_choice" in
             1) run_install ;;
             2) run_reinstall ;;
-            3) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -455,14 +455,14 @@ run_wings_menu() {
         echo -e "${BRED}${BOLD}--- Run Wings ---${NC}"
         echo -e "  ${CYAN}1)${NC} Run in terminal (foreground)"
         echo -e "  ${CYAN}2)${NC} Run in background (systemd)"
-        echo -e "  ${CYAN}3)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" run_choice
 
         case "$run_choice" in
             1) run_wings_foreground ;;
             2) run_wings_background ;;
-            3) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -475,7 +475,7 @@ wings_setup_menu() {
         echo -e "  ${CYAN}1)${NC} Wings install + docker + fix"
         echo -e "  ${CYAN}2)${NC} Wings config setup"
         echo -e "  ${CYAN}3)${NC} Run Wings"
-        echo -e "  ${CYAN}4)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" wings_choice
 
@@ -483,7 +483,7 @@ wings_setup_menu() {
             1) run_wings_install_docker_fix ;;
             2) run_wings_config ;;
             3) run_wings_menu ;;
-            4) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -735,14 +735,14 @@ blueprint_theme_menu() {
         echo -e "${CYAN}${BOLD}--- Blueprint Theme (cracked) ---${NC}"
         echo -e "  ${CYAN}1)${NC} Theme 1"
         echo -e "  ${CYAN}2)${NC} Theme 2"
-        echo -e "  ${CYAN}3)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
 
         case "$theme_choice" in
             1) run_blueprint_theme_1 ;;
             2) run_blueprint_theme_2 ;;
-            3) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -754,14 +754,14 @@ blueprint_menu() {
         echo -e "${CYAN}${BOLD}--- Blueprint ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
         echo -e "  ${CYAN}2)${NC} Blueprint Theme (cracked)"
-        echo -e "  ${CYAN}3)${NC} Exit"
+        echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
 
         case "$bp_choice" in
             1) run_blueprint_install ;;
             2) blueprint_theme_menu ;;
-            3) return ;;
+            0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
@@ -847,7 +847,7 @@ show_menu() {
     echo -e "  ${CYAN}3)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}4)${NC} Wings Setup"
     echo -e "  ${CYAN}5)${NC} System Spec"
-    echo -e "  ${CYAN}6)${NC} Blueprint"
+    echo -e "  ${CYAN}6)${NC} Blueprint + Themes (Fixed)"
     echo -e "  ${CYAN}7)${NC} Installed Apps"
     echo -e "  ${CYAN}8)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
