@@ -60,11 +60,10 @@ banner() {
     tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
     echo -e "${BRED}${tag}${NC}"
 
-    echo -e "${BRED}${BOLD}"
-    echo "============================================"
-    echo "                MAS Gui"
-    echo "============================================"
-    echo -e "${NC}"
+    echo -e "${CYAN}${BOLD}============================================${NC}"
+    echo -e "${BRED}${BOLD}                MAS Gui${NC}"
+    echo -e "${CYAN}${BOLD}============================================${NC}"
+    echo ""
 }
 
 pause() {
@@ -498,6 +497,120 @@ run_system_spec() {
 }
 
 # ============================================================
+# BLUEPRINT
+# ============================================================
+run_blueprint_install() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Blueprint Install ---${NC}"
+    echo ""
+
+    echo -e "${CYAN}>>> Running system update first (per script requirement)...${NC}"
+    apt update
+    apt upgrade -y
+
+    export PTERODACTYL_DIRECTORY=/var/www/pterodactyl
+
+    echo -e "${CYAN}>>> Installing curl wget unzip...${NC}"
+    apt install -y curl wget unzip
+
+    cd "$PTERODACTYL_DIRECTORY"
+
+    echo -e "${CYAN}>>> Downloading Blueprint release...${NC}"
+    wget "https://github.com/BlueprintFramework/framework/releases/latest/download/release.zip" -O "$PTERODACTYL_DIRECTORY/release.zip"
+    unzip -o release.zip
+
+    echo -e "${CYAN}>>> Installing base packages...${NC}"
+    apt install -y ca-certificates curl git gnupg unzip wget zip
+
+    echo -e "${CYAN}>>> Setting up NodeSource repo + Node 22...${NC}"
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
+    apt update
+    apt install -y nodejs
+
+    cd "$PTERODACTYL_DIRECTORY"
+    echo -e "${CYAN}>>> Installing yarn + running yarn install...${NC}"
+    npm i -g yarn
+    yarn install
+
+    touch "$PTERODACTYL_DIRECTORY/.blueprintrc"
+    echo \
+'WEBUSER="www-data";
+OWNERSHIP="www-data:www-data";
+USERSHELL="/bin/bash";' > "$PTERODACTYL_DIRECTORY/.blueprintrc"
+
+    echo -e "${CYAN}>>> Writing and running master_fix.sh (as-is, no changes)...${NC}"
+
+    # --- Rule 10 does not apply below: dropped in exactly as provided ---
+    cat << 'EOF' > /var/www/pterodactyl/master_fix.sh
+#!/bin/bash
+# ==============================================================================
+# PTERODACTYL & BLUEPRINT MASTER REPAIR SCRIPT
+# ==============================================================================
+
+set -e
+
+PTERODACTYL_DIR="/var/www/pterodactyl"
+
+echo -e "\e[34m[1/8] Setting UTF-8 Environment Locales...\e[0m"
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
+echo -e "\e[34m[2/8] Cleaning up Blueprint locks and stray files...\e[0m"
+rm -f "${PTERODACTYL_DIR}/.blueprint/lock"
+rm -f "${PTERODACTYL_DIR}/.blueprint/tmp"* -rf
+rm -f "${PTERODACTYL_DIR}/^C"
+rm -f "${PTERODACTYL_DIR}/nebula.blueprint"
+
+echo -e "\e[34m[3/8] Restoring Blueprint tracking structure...\e[0m"
+mkdir -p "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db"
+mkdir -p "${PTERODACTYL_DIR}/.blueprint/tmp"
+
+if [ ! -f "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/extensionfs.php" ]; then
+    echo '<?php return [];' > "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/extensionfs.php"
+fi
+
+touch "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db/installed_extensions"
+touch "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db/version"
+
+echo -e "\e[34m[4/8] Aligning system symlinks...\e[0m"
+ln -sf "${PTERODACTYL_DIR}" /app
+
+echo -e "\e[34m[5/8] Running database migrations & bringing panel live...\e[0m"
+cd "${PTERODACTYL_DIR}"
+php artisan down || true
+php artisan migrate --step --force
+php artisan up
+
+echo -e "\e[34m[6/8] Compiling frontend assets with legacy OpenSSL engine...\e[0m"
+export NODE_OPTIONS=--openssl-legacy-provider
+yarn build:production
+
+echo -e "\e[34m[7/8] Flushing application caches...\e[0m"
+php artisan optimize:clear
+php artisan config:clear
+php artisan view:clear
+php artisan route:clear
+
+echo -e "\e[34m[8/8] Re-applying file permissions...\e[0m"
+chown -R www-data:www-data "${PTERODACTYL_DIR}"
+chmod -R 755 "${PTERODACTYL_DIR}/storage" "${PTERODACTYL_DIR}/bootstrap/cache"
+
+echo -e "\e[32m========================================================\e[0m"
+echo -e "\e[32m SUCCESS: System repaired, compiled, and ready for use! \e[0m"
+echo -e "\e[32m========================================================\e[0m"
+EOF
+
+    chmod +x /var/www/pterodactyl/master_fix.sh
+    /var/www/pterodactyl/master_fix.sh
+
+    echo ""
+    echo -e "${CYAN}>>> Blueprint install + repair complete.${NC}"
+    pause
+}
+
+# ============================================================
 # CREDITS
 # ============================================================
 show_credits() {
@@ -518,7 +631,8 @@ show_menu() {
     echo -e "  ${CYAN}2)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}3)${NC} Wings Setup"
     echo -e "  ${CYAN}4)${NC} System Spec"
-    echo -e "  ${CYAN}5)${NC} Credits"
+    echo -e "  ${CYAN}5)${NC} Blueprint"
+    echo -e "  ${CYAN}6)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" choice
@@ -528,7 +642,8 @@ show_menu() {
         2) panel_setup_menu ;;
         3) wings_setup_menu ;;
         4) run_system_spec ;;
-        5) show_credits ;;
+        5) run_blueprint_install ;;
+        6) show_credits ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
