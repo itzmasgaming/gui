@@ -778,12 +778,15 @@ run_installed_apps() {
     # ---- Cloudflare ----
     if command -v cloudflared >/dev/null 2>&1; then
         cf_status="Not running"
+        cf_color="${BRED}"
         if [ -f /etc/systemd/system/cloudflared.service ] && [ "$(systemctl is-active cloudflared 2>/dev/null)" = "active" ]; then
             cf_status="Running"
+            cf_color="${YELLOW}"
         elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
             cf_status="Running"
+            cf_color="${YELLOW}"
         fi
-        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${cf_status}${NC}"
+        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${cf_color}${cf_status}${NC}"
     else
         echo -e "${WHITE}Cloudflare:${NC} ${BRED}Not installed${NC}"
     fi
@@ -798,7 +801,9 @@ run_installed_apps() {
     # ---- Docker ----
     if command -v docker >/dev/null 2>&1; then
         docker_status=$(systemctl is-active docker 2>/dev/null)
-        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${docker_status:-Not running}${NC}"
+        docker_color="${BRED}"
+        [ "$docker_status" = "active" ] && docker_color="${YELLOW}"
+        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} - ${docker_color}${docker_status:-Not running}${NC}"
     else
         echo -e "${WHITE}Docker:${NC} ${BRED}Not installed${NC}"
     fi
@@ -806,12 +811,15 @@ run_installed_apps() {
     # ---- Wings ----
     if [ -f /usr/local/bin/wings ]; then
         wings_status="Not running"
+        wings_color="${BRED}"
         if [ -f /etc/systemd/system/wings.service ] && [ "$(systemctl is-active wings 2>/dev/null)" = "active" ]; then
             wings_status="Running"
+            wings_color="${YELLOW}"
         elif pgrep -x "wings" >/dev/null 2>&1; then
             wings_status="Running"
+            wings_color="${YELLOW}"
         fi
-        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${YELLOW}${wings_status}${NC}"
+        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${wings_color}${wings_status}${NC}"
     else
         echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
     fi
@@ -820,7 +828,7 @@ run_installed_apps() {
     if [ -f /etc/pterodactyl/config.yml ]; then
         echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC}"
     else
-        echo -e "${WHITE}Wings config:${NC} ${BRED}Not found${NC}"
+        echo -e "${WHITE}Wings config:${NC} ${BRED}Not installed${NC}"
     fi
 
     # ---- Blueprint ----
