@@ -703,12 +703,17 @@ EOF
     pause
 }
 
+clear_blueprint_lock() {
+    rm -f "$PTERODACTYL_DIR/.blueprint/lock" 2>/dev/null
+}
+
 run_theme_nebula() {
     echo ""
     echo -e "${CYAN}>>> Nebula auto-install starting...${NC}"
     cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
 
     wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/nebula.blueprint
+    clear_blueprint_lock
     yes "" | blueprint -i nebula
     rm -f nebula.blueprint
 
@@ -722,6 +727,7 @@ run_theme_euphoria() {
     cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
 
     wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/euphoriatheme.blueprint
+    clear_blueprint_lock
     blueprint -i euphoriatheme
     rm -f euphoriatheme.blueprint
 
@@ -738,9 +744,13 @@ run_theme_add_tool() {
     wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/mcplugins.blueprint
     wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/sagaminecraftplayermanager.blueprint
     wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/huxregister.blueprint
+    clear_blueprint_lock
     blueprint -i versionchanger
+    clear_blueprint_lock
     blueprint -i mcplugins
+    clear_blueprint_lock
     blueprint -i sagaminecraftplayermanager
+    clear_blueprint_lock
     blueprint -i huxregister.blueprint
     rm -f versionchanger.blueprint mcplugins.blueprint sagaminecraftplayermanager.blueprint huxregister.blueprint
 
@@ -818,7 +828,6 @@ blueprint_menu() {
         echo -e "${CYAN}${BOLD}--- Blueprint & Themes ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
         echo -e "  ${CYAN}2)${NC} Themes + Extensions Installer"
-        echo -e "  ${CYAN}3)${NC} Add Extensions Tab to Admin Sidebar"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
@@ -826,102 +835,10 @@ blueprint_menu() {
         case "$bp_choice" in
             1) run_blueprint_install ;;
             2) theme_installer_menu ;;
-            3) run_add_extensions_tab ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
-}
-
-# ============================================================
-# ADMIN - Add "Extensions" tab (forwards to /admin/extensions)
-# ============================================================
-run_add_extensions_tab() {
-    banner
-    echo -e "${CYAN}${BOLD}--- Add Extensions Tab to Admin Sidebar ---${NC}"
-    echo ""
-
-    NAV_FILE="${PTERODACTYL_DIR}/resources/scripts/components/admin/AdminSubNavigation.tsx"
-
-    if [ ! -f "$NAV_FILE" ]; then
-        echo -e "${BRED}Could not find AdminSubNavigation.tsx at:${NC}"
-        echo -e "    $NAV_FILE"
-        echo -e "${YELLOW}Searching for it elsewhere...${NC}"
-        FOUND=$(find "${PTERODACTYL_DIR}/resources" -iname "AdminSubNavigation.tsx" 2>/dev/null | head -n1)
-        if [ -z "$FOUND" ]; then
-            echo -e "${BRED}File not found anywhere under resources/. Aborting - panel structure may differ from expected.${NC}"
-            pause
-            return
-        fi
-        NAV_FILE="$FOUND"
-        echo -e "${GREEN}Found: $NAV_FILE${NC}"
-    fi
-
-    if grep -q "admin/extensions" "$NAV_FILE"; then
-        echo -e "${YELLOW}An Extensions link already exists in this file. Skipping edit.${NC}"
-        pause
-        return
-    fi
-
-    cp "$NAV_FILE" "${NAV_FILE}.bak.$(date +%s)"
-    echo -e "${CYAN}>>> Backed up original file.${NC}"
-
-    # Insert a plain <a> tag (full page nav, NOT NavLink/client route)
-    # right after the Settings NavLink line, so it survives even if
-    # Blueprint's own injection is broken.
-    python3 - "$NAV_FILE" << 'PYEOF'
-import sys, re
-
-path = sys.argv[1]
-with open(path, "r") as f:
-    content = f.read()
-
-anchor_line_pattern = re.compile(r'(<NavLink[^>]*to=\{[\'"]\/admin\/settings[\'"]\}[^>]*>.*?<\/NavLink>)', re.DOTALL)
-
-new_link = (
-    '\n            <a href={\'/admin/extensions\'} '
-    'style={{ padding: \'0 1rem\', display: \'flex\', alignItems: \'center\' }}>'
-    'Extensions</a>'
-)
-
-match = anchor_line_pattern.search(content)
-if match:
-    insert_point = match.end()
-    content = content[:insert_point] + new_link + content[insert_point:]
-    with open(path, "w") as f:
-        f.write(content)
-    print("PATCHED_OK")
-else:
-    print("PATCH_ANCHOR_NOT_FOUND")
-PYEOF
-
-    if grep -q "admin/extensions" "$NAV_FILE"; then
-        echo -e "${GREEN}>>> Extensions tab added successfully.${NC}"
-    else
-        echo -e "${BRED}>>> Automatic patch failed - the Settings NavLink pattern wasn't found in this file.${NC}"
-        echo -e "${YELLOW}>>> Restoring backup. You'll need to add the link manually, or share the file contents so the patch can be adjusted.${NC}"
-        LATEST_BAK=$(ls -t "${NAV_FILE}".bak.* | head -n1)
-        cp "$LATEST_BAK" "$NAV_FILE"
-        pause
-        return
-    fi
-
-    echo ""
-    echo -e "${CYAN}>>> Rebuilding frontend assets (this can take a few minutes)...${NC}"
-    cd "$PTERODACTYL_DIR" || return
-    export NODE_OPTIONS=--openssl-legacy-provider
-    yarn build:production
-
-    echo ""
-    echo -e "${CYAN}>>> Clearing panel caches...${NC}"
-    php artisan optimize:clear
-    php artisan config:clear
-    php artisan view:clear
-    php artisan route:clear
-
-    echo ""
-    echo -e "${BGREEN}>>> Done. Hard-refresh the admin panel (Ctrl+Shift+R) and check the sidebar.${NC}"
-    pause
 }
 
 # ============================================================
