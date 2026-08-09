@@ -48,6 +48,7 @@ CFG_AGREE_TOS="y"
 CFG_ASSUME_SSL="y"
 
 PANEL_INSTALLER_URL="https://pterodactyl-installer.se/"
+PTERODACTYL_DIR="/var/www/pterodactyl"
 # ===============================================
 
 # ---------------- HELPERS ----------------
@@ -55,7 +56,7 @@ banner() {
     clear
     echo -e "$WATERMARK"
 
-    tag="ɪᴛℤᴍᴀꜱɢᴀᴍɪɴɢ"
+    tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
     echo -e "${BRED}${tag}${NC}"
 
     echo -e "${CYAN}${BOLD}============================================${NC}"
@@ -74,6 +75,22 @@ check_root() {
         echo -e "${BRED}This script must be run as root. Try: sudo bash $0${NC}"
         exit 1
     fi
+}
+
+# Fixes "System locale encoding is not UTF-8" FATAL errors from Blueprint.
+# Just exporting LC_ALL=C.UTF-8 isn't always enough on minimal Docker images
+# where the locales package is stripped down - this actually generates and
+# registers a real UTF-8 locale system-wide, once, for the whole script.
+fix_locale() {
+    if ! locale -a 2>/dev/null | grep -qi "en_US.utf8\|en_US.UTF-8"; then
+        apt-get install -y locales >/dev/null 2>&1
+        sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen 2>/dev/null
+        grep -q "^en_US.UTF-8 UTF-8" /etc/locale.gen 2>/dev/null || echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+        locale-gen en_US.UTF-8 >/dev/null 2>&1
+        update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 >/dev/null 2>&1
+    fi
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
 }
 
 # ============================================================
@@ -276,19 +293,16 @@ run_wings_install_docker_fix() {
     echo -e "${BGREEN}>>> Wings install + docker + fix - starting...${NC}"
     echo ""
 
-    # --- Stop and purge any existing docker/containerd ---
     systemctl stop docker containerd 2>/dev/null
     apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
     rm -rf /var/lib/docker /var/lib/containerd /etc/docker/daemon.json
     apt-mark unhold docker-ce docker-ce-cli containerd.io 2>/dev/null
 
-    # --- Add Docker's official apt repo ---
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
     apt-get update
 
-    # --- Initial daemon.json (vfs storage driver) ---
     mkdir -p /etc/docker
     cat <<'EOF' > /etc/docker/daemon.json
 {
@@ -296,7 +310,6 @@ run_wings_install_docker_fix() {
 }
 EOF
 
-    # --- Install pinned safe versions ---
     SAFE_CONTAINERD=$(apt-cache madison containerd.io | grep -m 1 '1.6.' | awk '{print $3}')
     DOCKER_VER=$(apt-cache madison docker-ce | grep -m 1 '5:26.' | awk '{print $3}')
     CLI_VER=$(apt-cache madison docker-ce-cli | grep -m 1 '5:26.' | awk '{print $3}')
@@ -306,7 +319,6 @@ EOF
     systemctl enable --now containerd docker
     docker run hello-world
 
-    # --- Final daemon.json (iptables + DNS) ---
     cat <<'EOF' > /etc/docker/daemon.json
 {
   "storage-driver": "vfs",
@@ -319,15 +331,12 @@ EOF
 EOF
     systemctl restart docker
 
-    # --- Wings binary ---
     mkdir -p /etc/pterodactyl
     curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")"
     chmod u+x /usr/local/bin/wings
 
-    # --- Self-signed cert ---
     mkdir -p /etc/certs && cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 -subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" -keyout privkey.pem -out fullchain.pem
 
-    # --- Docker network ---
     cd /etc/pterodactyl
     docker network create --driver=bridge pterodactyl0 2>/dev/null || true
 
@@ -532,7 +541,7 @@ run_system_spec() {
     read -r _ total_b used_b avail_b _ < <(df -B1 / | tail -1)
     storage_total_gb=$(awk "BEGIN {printf \"%.0f\", $total_b/1000000000}")
     storage_used_gb=$(awk "BEGIN {printf \"%.0f\", $used_b/1000000000}")
-    storage_avail_gb=$(awk "BEGIN {printf \"%.0f\", $storage_avail_gb}")
+    storage_avail_gb=$(awk "BEGIN {printf \"%.0f\", $avail_b/1000000000}")
 
     if command -v nvidia-smi >/dev/null 2>&1; then
         gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)
@@ -698,8 +707,47 @@ run_themes_and_extensions() {
     banner
     echo -e "${CYAN}${BOLD}--- Themes & Extensions Installer ---${NC}"
     echo ""
+    echo -e "${YELLOW}>>> Note: this runs a third-party script not written by this tool.${NC}"
+    echo -e "${YELLOW}>>> Review it yourself if you want to verify what it does: ${NC}"
+    echo -e "    https://raw.githubusercontent.com/nobita329/The-Coding-Hub/refs/heads/main/srv/thame/chang.sh"
+    echo ""
     echo -e "${CYAN}>>> Fetching and running Themes + Extensions installer...${NC}"
     bash <(curl -s https://raw.githubusercontent.com/nobita329/The-Coding-Hub/refs/heads/main/srv/thame/chang.sh)
+    pause
+}
+
+run_nebula_theme() {
+    banner
+    echo -e "${CYAN}${BOLD}--- Nebula Theme Install ---${NC}"
+    echo ""
+
+    local nebula_file="${PTERODACTYL_DIR}/nebulaa.blueprint"
+
+    if [ ! -f "$nebula_file" ]; then
+        echo -e "${BRED}nebulaa.blueprint not found at ${nebula_file}${NC}"
+        echo ""
+        echo -e "${YELLOW}Upload the file there first, e.g. from your own machine:${NC}"
+        echo -e "    scp nebulaa.blueprint root@your-server-ip:${nebula_file}"
+        pause
+        return
+    fi
+
+    if ! command -v blueprint >/dev/null 2>&1; then
+        echo -e "${BRED}Blueprint CLI not found. Run 'Blueprint install (fixed)' first.${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}>>> Installing Nebula theme via Blueprint CLI...${NC}"
+    cd "$PTERODACTYL_DIR"
+    blueprint -install nebulaa.blueprint
+
+    echo ""
+    echo -e "${CYAN}>>> Running blueprint -upgrade to finalize...${NC}"
+    blueprint -upgrade
+
+    echo ""
+    echo -e "${BGREEN}>>> Nebula theme install complete. Hard-refresh your panel to see it.${NC}"
     pause
 }
 
@@ -709,6 +757,7 @@ blueprint_menu() {
         echo -e "${CYAN}${BOLD}--- Blueprint & Themes ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
         echo -e "  ${CYAN}2)${NC} Themes + Extensions Installer"
+        echo -e "  ${CYAN}3)${NC} Nebula Theme (install)"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
@@ -716,6 +765,7 @@ blueprint_menu() {
         case "$bp_choice" in
             1) run_blueprint_install ;;
             2) run_themes_and_extensions ;;
+            3) run_nebula_theme ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -834,6 +884,7 @@ show_menu() {
 }
 
 check_root
+fix_locale
 while true; do
     show_menu
 done
