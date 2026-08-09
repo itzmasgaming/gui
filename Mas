@@ -769,8 +769,8 @@ run_blueprint_theme_abysspurple() {
     echo -e "${WHITE}Free, MIT-licensed Blueprint theme by fernsehheft (glassmorphism / deep-space purple).${NC}"
     echo ""
     install_blueprint_extension \
-        "Nebula" \
-        "https://github.com/itzmasgaming-code/itzmasgaming-codehub/blob/main/nebulaa.blueprint" \
+        "Abyss Purple" \
+        "https://github.com/itzmasgaming-code/itzmasgaming-codehub/raw/main/Abyss-Purple.blueprint" \
         "abysspurple"
 }
 
@@ -786,14 +786,14 @@ blueprint_theme_menu() {
     while true; do
         banner
         echo -e "${CYAN}${BOLD}--- Blueprint Themes ---${NC}"
-        echo -e "  ${CYAN}1)${NC} Nebula (Paid)"
+        echo -e "  ${CYAN}1)${NC} Abyss Purple (free)"
         echo -e "  ${CYAN}2)${NC} Theme 2"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
 
         case "$theme_choice" in
-            1) run_blueprint_theme_nebula ;;
+            1) run_blueprint_theme_abysspurple ;;
             2) run_blueprint_theme_2 ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
