@@ -24,7 +24,6 @@ HIDDEN='\033[8m'   # conceal - text present in output, invisible in most termina
 NC='\033[0m' # No Color
 
 # Hidden watermark (present in every run's output, invisible unless selected/copied)
-# Also hidden in source: stored base64-encoded, decoded at runtime.
 _WM_B64="U3ViIEl0ek1BU0dhbWluZw=="
 WATERMARK="${HIDDEN}$(echo "$_WM_B64" | base64 -d 2>/dev/null)${NC}"
 
@@ -56,8 +55,7 @@ banner() {
     clear
     echo -e "$WATERMARK"
 
-    # small tag top-left: "ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
-    tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
+    tag="ɪᴛℤᴍᴀꜱɢᴀᴍɪɴɢ"
     echo -e "${BRED}${tag}${NC}"
 
     echo -e "${CYAN}${BOLD}============================================${NC}"
@@ -191,9 +189,6 @@ EOF
 }
 
 build_answers_reinstall() {
-    # Extra "y" right after mode select (0) to confirm overwrite.
-    # Placement is UNVERIFIED against a live "existing install found" prompt -
-    # test once and adjust if the real prompt lands elsewhere.
     cat <<EOF
 0
 y
@@ -342,7 +337,7 @@ EOF
 }
 
 # ============================================================
-# WINGS - config setup (config.yml generator)
+# WINGS - config setup
 # ============================================================
 run_wings_config() {
     echo ""
@@ -393,7 +388,7 @@ EOF
     echo ""
     echo -e "${BGREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
     echo ""
-    echo -e "${CYAN}>>> Creating wings.service (was missing - not auto-created by manual install)...${NC}"
+    echo -e "${CYAN}>>> Creating wings.service...${NC}"
     cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -436,7 +431,7 @@ run_wings_foreground() {
 run_wings_background() {
     echo ""
     if [ ! -f /etc/systemd/system/wings.service ]; then
-        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first (option 2) - it creates the service file.${NC}"
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first (option 2).${NC}"
         pause
         return
     fi
@@ -514,12 +509,9 @@ run_system_spec() {
     echo -e "${BRED}${BOLD}--- System Spec ---${NC}"
     echo ""
 
-    # ---- CPU model ----
     cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d':' -f2 | sed 's/^ *//')
     [ -z "$cpu_model" ] && cpu_model="Unknown"
 
-    # ---- Allowed core/thread range (container-aware) ----
-    # Prefers cgroup v2, falls back to v1, falls back to /proc/self/status
     if [ -f /sys/fs/cgroup/cpuset.cpus.effective ]; then
         core_range=$(cat /sys/fs/cgroup/cpuset.cpus.effective)
     elif [ -f /sys/fs/cgroup/cpuset/cpuset.cpus ]; then
@@ -531,20 +523,17 @@ run_system_spec() {
 
     thread_count=$(nproc)
 
-    # ---- RAM (decimal GB, not GiB) ----
     mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     mem_avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
     mem_total_gb=$(awk "BEGIN {printf \"%.0f\", $mem_total_kb*1024/1000000000}")
     mem_avail_gb=$(awk "BEGIN {printf \"%.0f\", $mem_avail_kb*1024/1000000000}")
     mem_used_gb=$(awk "BEGIN {printf \"%.0f\", $mem_total_gb-$mem_avail_gb}")
 
-    # ---- Storage (decimal GB, root filesystem) ----
     read -r _ total_b used_b avail_b _ < <(df -B1 / | tail -1)
     storage_total_gb=$(awk "BEGIN {printf \"%.0f\", $total_b/1000000000}")
     storage_used_gb=$(awk "BEGIN {printf \"%.0f\", $used_b/1000000000}")
-    storage_avail_gb=$(awk "BEGIN {printf \"%.0f\", $avail_b/1000000000}")
+    storage_avail_gb=$(awk "BEGIN {printf \"%.0f\", $storage_avail_gb}")
 
-    # ---- GPU ----
     if command -v nvidia-smi >/dev/null 2>&1; then
         gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)
         [ -z "$gpu_info" ] && gpu_info="NVIDIA tools present but no GPU detected"
@@ -552,7 +541,6 @@ run_system_spec() {
         gpu_info="No GPU detected / nvidia-smi not installed"
     fi
 
-    # ---- Runtime / uptime ----
     if command -v uptime >/dev/null 2>&1; then
         runtime_info=$(uptime -p 2>/dev/null)
     fi
@@ -581,14 +569,14 @@ run_system_spec() {
 }
 
 # ============================================================
-# BLUEPRINT
+# BLUEPRINT & THEMES
 # ============================================================
 run_blueprint_install() {
     banner
     echo -e "${CYAN}${BOLD}--- Blueprint Install ---${NC}"
     echo ""
 
-    echo -e "${CYAN}>>> Running system update first (per script requirement)...${NC}"
+    echo -e "${CYAN}>>> Running system update first...${NC}"
     apt update
     apt upgrade -y
 
@@ -624,15 +612,10 @@ run_blueprint_install() {
 OWNERSHIP="www-data:www-data";
 USERSHELL="/bin/bash";' > "$PTERODACTYL_DIRECTORY/.blueprintrc"
 
-    echo -e "${CYAN}>>> Writing and running master_fix.sh (as-is, no changes)...${NC}"
+    echo -e "${CYAN}>>> Writing and running master_fix.sh...${NC}"
 
-    # --- Rule 10 does not apply below: dropped in exactly as provided ---
     cat << 'EOF' > /var/www/pterodactyl/master_fix.sh
 #!/bin/bash
-# ==============================================================================
-# PTERODACTYL & BLUEPRINT MASTER REPAIR SCRIPT
-# ==============================================================================
-
 set -e
 
 PTERODACTYL_DIR="/var/www/pterodactyl"
@@ -690,15 +673,13 @@ EOF
     /var/www/pterodactyl/master_fix.sh
 
     echo ""
-    echo -e "${CYAN}>>> Running Blueprint's official installer (registers extension in DB)...${NC}"
+    echo -e "${CYAN}>>> Running Blueprint's official installer...${NC}"
     export NODE_OPTIONS=--openssl-legacy-provider
 
-    # Pre-create debug log path so blueprint.sh doesn't spam "No such file" errors
     mkdir -p /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug
     touch /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug/logs.txt
 
     chmod +x /var/www/pterodactyl/blueprint.sh
-    # Auto-answer the "put into maintenance mode?" prompt with y
     echo "y" | /var/www/pterodactyl/blueprint.sh
 
     echo ""
@@ -713,119 +694,28 @@ EOF
     pause
 }
 
-PTERODACTYL_DIR_DEFAULT="/var/www/pterodactyl"
-
-# ------------------------------------------------------------
-# Generic helper: download + install any Blueprint .blueprint
-# theme/extension file given its download URL and identifier
-# (identifier = the string used by `blueprint -i <identifier>`,
-# found in the theme's conf.yml).
-# ------------------------------------------------------------
-install_blueprint_extension() {
-    local name="$1"
-    local url="$2"
-    local identifier="$3"
-    # Blueprint's CLI looks for a file literally named "<identifier>.blueprint"
-    # in the current directory - it does NOT care what the remote URL's
-    # filename was. Force it to the correct name here so this never breaks
-    # again regardless of how the source file is named upstream.
-    local filename="${identifier}.blueprint"
-
-    if [ ! -d "$PTERODACTYL_DIR_DEFAULT" ]; then
-        echo -e "${BRED}Pterodactyl doesn't look installed at ${PTERODACTYL_DIR_DEFAULT}.${NC}"
-        pause
-        return 1
-    fi
-
-    if ! command -v blueprint >/dev/null 2>&1 && [ ! -f "${PTERODACTYL_DIR_DEFAULT}/blueprint.sh" ]; then
-        echo -e "${BRED}Blueprint isn't installed yet. Run 'Blueprint install (fixed)' first.${NC}"
-        pause
-        return 1
-    fi
-
-    echo -e "${CYAN}>>> Downloading ${name}...${NC}"
-    if ! wget -q --show-progress "$url" -O "${PTERODACTYL_DIR_DEFAULT}/${filename}"; then
-        echo -e "${BRED}Download failed. Check network/URL and try again.${NC}"
-        pause
-        return 1
-    fi
-
-    # Sanity check: make sure we actually got a zip/blueprint archive and
-    # not an HTML error page (common when a raw URL 404s or redirects).
-    if ! file "${PTERODACTYL_DIR_DEFAULT}/${filename}" | grep -qi "zip"; then
-        echo -e "${BRED}Downloaded file doesn't look like a valid .blueprint archive (got HTML/error page instead). Check the URL.${NC}"
-        rm -f "${PTERODACTYL_DIR_DEFAULT}/${filename}"
-        pause
-        return 1
-    fi
-
-    cd "$PTERODACTYL_DIR_DEFAULT" || { echo -e "${BRED}Could not cd into ${PTERODACTYL_DIR_DEFAULT}${NC}"; pause; return 1; }
-
-    echo -e "${CYAN}>>> Installing ${name} via Blueprint...${NC}"
-    export NODE_OPTIONS=--openssl-legacy-provider
-    if command -v blueprint >/dev/null 2>&1; then
-        blueprint -i "$identifier"
-    else
-        ./blueprint.sh -i "$identifier"
-    fi
-
-    echo ""
-    echo -e "${BGREEN}>>> ${name} installed. Configure it under admin > extensions > ${identifier} in your panel.${NC}"
-    pause
-}
-
-run_blueprint_theme_abysspurple() {
+run_themes_and_extensions() {
     banner
-    echo -e "${CYAN}${BOLD}--- Abyss Purple Theme ---${NC}"
+    echo -e "${CYAN}${BOLD}--- Themes & Extensions Installer ---${NC}"
     echo ""
-    echo -e "${WHITE}Free, MIT-licensed Blueprint theme by fernsehheft (glassmorphism / deep-space purple).${NC}"
-    echo ""
-    install_blueprint_extension \
-        "Abyss Purple" \
-        "https://github.com/nobita329/The-Coding-Hub/blob/main/srv/thame/nebula.blueprint" \
-        "abysspurple"
-}
-
-run_blueprint_theme_2() {
-    banner
-    echo -e "${CYAN}${BOLD}--- Blueprint Theme 2 ---${NC}"
-    echo ""
-    echo -e "${YELLOW}Under Dev${NC}"
+    echo -e "${CYAN}>>> Fetching and running Themes + Extensions installer...${NC}"
+    bash <(curl -s https://raw.githubusercontent.com/nobita329/The-Coding-Hub/refs/heads/main/srv/thame/chang.sh)
     pause
-}
-
-blueprint_theme_menu() {
-    while true; do
-        banner
-        echo -e "${CYAN}${BOLD}--- Blueprint Themes ---${NC}"
-        echo -e "  ${CYAN}1)${NC} Nebula (Paid)"
-        echo -e "  ${CYAN}2)${NC} Theme 2"
-        echo -e "  ${BRED}0)${NC} Exit"
-        echo ""
-        read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" theme_choice
-
-        case "$theme_choice" in
-            1) run_blueprint_theme_nebula ;;
-            2) run_blueprint_theme_2 ;;
-            0) return ;;
-            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
-        esac
-    done
 }
 
 blueprint_menu() {
     while true; do
         banner
-        echo -e "${CYAN}${BOLD}--- Blueprint ---${NC}"
+        echo -e "${CYAN}${BOLD}--- Blueprint & Themes ---${NC}"
         echo -e "  ${CYAN}1)${NC} Blueprint install (fixed)"
-        echo -e "  ${CYAN}2)${NC} Blueprint Themes"
+        echo -e "  ${CYAN}2)${NC} Themes + Extensions Installer"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${CYAN}"Select an option: "${NC})" bp_choice
 
         case "$bp_choice" in
             1) run_blueprint_install ;;
-            2) blueprint_theme_menu ;;
+            2) run_themes_and_extensions ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -840,7 +730,6 @@ run_installed_apps() {
     echo -e "${CYAN}${BOLD}--- Installed Apps ---${NC}"
     echo ""
 
-    # ---- Cloudflare ----
     if command -v cloudflared >/dev/null 2>&1; then
         cf_status="Not running"
         cf_color="${BRED}"
@@ -856,14 +745,12 @@ run_installed_apps() {
         echo -e "${WHITE}Cloudflare:${NC} ${BRED}Not installed${NC}"
     fi
 
-    # ---- Pterodactyl Panel ----
     if [ -f /var/www/pterodactyl/artisan ]; then
         echo -e "${WHITE}Pterodactyl Panel:${NC} ${YELLOW}Installed${NC}"
     else
         echo -e "${WHITE}Pterodactyl Panel:${NC} ${BRED}Not installed${NC}"
     fi
 
-    # ---- Docker ----
     if command -v docker >/dev/null 2>&1; then
         docker_status=$(systemctl is-active docker 2>/dev/null)
         docker_color="${BRED}"
@@ -873,7 +760,6 @@ run_installed_apps() {
         echo -e "${WHITE}Docker:${NC} ${BRED}Not installed${NC}"
     fi
 
-    # ---- Wings ----
     if [ -f /usr/local/bin/wings ]; then
         wings_status="Not running"
         wings_color="${BRED}"
@@ -889,14 +775,12 @@ run_installed_apps() {
         echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
     fi
 
-    # ---- Wings config ----
     if [ -f /etc/pterodactyl/config.yml ]; then
         echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC}"
     else
         echo -e "${WHITE}Wings config:${NC} ${BRED}Not installed${NC}"
     fi
 
-    # ---- Blueprint ----
     if [ -d /var/www/pterodactyl/.blueprint ]; then
         echo -e "${WHITE}Blueprint:${NC} ${YELLOW}Installed${NC}"
     else
@@ -928,7 +812,7 @@ show_menu() {
     echo -e "  ${CYAN}3)${NC} Pterodactyl Panel Setup"
     echo -e "  ${CYAN}4)${NC} Wings Setup"
     echo -e "  ${CYAN}5)${NC} System Spec"
-    echo -e "  ${CYAN}6)${NC} Blueprint + Themes"
+    echo -e "  ${CYAN}6)${NC} Blueprint + Themes (Fixed)"
     echo -e "  ${CYAN}7)${NC} Installed Apps"
     echo -e "  ${CYAN}8)${NC} Credits"
     echo -e "  ${BRED}0)${NC} Exit"
