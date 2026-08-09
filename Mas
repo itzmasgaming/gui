@@ -15,6 +15,7 @@ BYELLOW='\033[1;93m'
 BLUE='\033[0;34m'
 BBLUE='\033[1;94m'
 CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 BCYAN='\033[1;96m'
 MAGENTA='\033[0;35m'
 BMAGENTA='\033[1;95m'
@@ -501,10 +502,10 @@ run_system_spec() {
 # ============================================================
 show_credits() {
     banner
-    echo -e "${BRED}${BOLD}--- Credits ---${NC}"
+    echo -e "${CYAN}${BOLD}--- Credits ---${NC}"
     echo ""
-    echo -e "${RED}Docker and Wings fixers given by:${NC} Xorvila Team Dev"
-    echo -e "${RED}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ItzMASGaming"
+    echo -e "${WHITE}Docker and Wings fixers given by:${NC} ${YELLOW}Xorvila Team Dev${NC}"
+    echo -e "${WHITE}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ${YELLOW}ItzMASGaming${NC}"
     pause
 }
 
