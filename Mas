@@ -111,11 +111,65 @@ confirm_destructive() {
 # ============================================================
 # CLOUDFLARE
 # ============================================================
+install_cloudflare() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Install Cloudflare ---${NC}"
+    echo ""
+
+    if command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${YELLOW}cloudflared is already installed ($(cloudflared --version 2>/dev/null | head -n1)).${NC}"
+        read -rp "$(echo -e ${YELLOW}"Reinstall / redownload it anyway? (y/n): "${NC})" cf_reinstall_ans
+        if [[ ! "$cf_reinstall_ans" =~ ^[Yy]$ ]]; then
+            pause
+            return
+        fi
+    fi
+
+    echo -e "${BCYAN}>>> Installing dependencies (curl)...${NC}"
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl >/dev/null 2>&1
+
+    local cf_arch
+    case "$(uname -m)" in
+        x86_64) cf_arch="amd64" ;;
+        aarch64|arm64) cf_arch="arm64" ;;
+        armv7l) cf_arch="arm" ;;
+        *) cf_arch="amd64" ;;
+    esac
+
+    echo -e "${BCYAN}>>> Downloading cloudflared (${cf_arch})...${NC}"
+    if ! curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
+        echo -e "${BRED}Download failed. Check your network/internet connection and try again.${NC}"
+        pause
+        return
+    fi
+    chmod +x /usr/local/bin/cloudflared
+
+    # Make sure it's on PATH even if /usr/local/bin isn't (also drop a copy at /usr/bin,
+    # since uninstall_cloudflare cleans up both locations).
+    ln -sf /usr/local/bin/cloudflared /usr/bin/cloudflared 2>/dev/null
+
+    if command -v cloudflared >/dev/null 2>&1; then
+        echo ""
+        echo -e "${BGREEN}>>> cloudflared installed successfully: $(cloudflared --version 2>/dev/null | head -n1)${NC}"
+        echo -e "${BGREEN}>>> You can now use 'Run in terminal' or 'Run in background' from the Cloudflare menu.${NC}"
+    else
+        echo -e "${BRED}Something went wrong - cloudflared is still not on PATH.${NC}"
+    fi
+    pause
+}
+
 run_cloudflare_foreground() {
     if ! command -v cloudflared >/dev/null 2>&1; then
         echo -e "${BRED}cloudflared is not installed on this system.${NC}"
-        pause
-        return
+        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
+        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
+            install_cloudflare
+        fi
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            pause
+            return
+        fi
     fi
     echo ""
     read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
@@ -136,8 +190,14 @@ run_cloudflare_foreground() {
 run_cloudflare_background() {
     if ! command -v cloudflared >/dev/null 2>&1; then
         echo -e "${BRED}cloudflared is not installed on this system.${NC}"
-        pause
-        return
+        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
+        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
+            install_cloudflare
+        fi
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            pause
+            return
+        fi
     fi
     echo ""
     read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
@@ -173,19 +233,95 @@ SERVICE_EOF
     pause
 }
 
+# ---- Cloudflare background service control (start/stop/restart/status) ----
+cloudflare_service_start() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Run 'Run in background (systemd)' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Cloudflare background service...${NC}"
+    systemctl enable --now cloudflared
+    systemctl status cloudflared --no-pager
+    pause
+}
+
+cloudflare_service_stop() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Nothing to stop.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Stopping Cloudflare background service...${NC}"
+    systemctl stop cloudflared
+    echo -e "${BGREEN}>>> Cloudflare background service stopped.${NC}"
+    pause
+}
+
+cloudflare_service_restart() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Run 'Run in background (systemd)' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Restarting Cloudflare background service...${NC}"
+    systemctl restart cloudflared
+    systemctl status cloudflared --no-pager
+    pause
+}
+
+cloudflare_service_status() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Cloudflare Service Status ---${NC}"
+    echo ""
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found.${NC}"
+    else
+        systemctl status cloudflared --no-pager
+    fi
+    pause
+}
+
+cloudflare_background_service_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Cloudflare Background Service ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Start"
+        echo -e "  ${BCYAN}2)${NC} Stop"
+        echo -e "  ${BCYAN}3)${NC} Restart"
+        echo -e "  ${BCYAN}4)${NC} Status"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" cfbg_choice
+
+        case "$cfbg_choice" in
+            1) cloudflare_service_start ;;
+            2) cloudflare_service_stop ;;
+            3) cloudflare_service_restart ;;
+            4) cloudflare_service_status ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
 cloudflare_menu() {
     while true; do
         banner
         echo -e "${BCYAN}${BOLD}--- Cloudflare ---${NC}"
-        echo -e "  ${BCYAN}1)${NC} Run in terminal (foreground)"
-        echo -e "  ${BCYAN}2)${NC} Run in background (systemd)"
+        echo -e "  ${BCYAN}1)${NC} Install Cloudflare"
+        echo -e "  ${BCYAN}2)${NC} Run in terminal (foreground)"
+        echo -e "  ${BCYAN}3)${NC} Run in background (systemd)"
+        echo -e "  ${BCYAN}4)${NC} Cloudflare Background Service"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" cf_choice
 
         case "$cf_choice" in
-            1) run_cloudflare_foreground ;;
-            2) run_cloudflare_background ;;
+            1) install_cloudflare ;;
+            2) run_cloudflare_foreground ;;
+            3) run_cloudflare_background ;;
+            4) cloudflare_background_service_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -696,6 +832,78 @@ run_wings_menu() {
     done
 }
 
+# ---- Wings background service control (start/stop/restart/status) ----
+wings_service_start() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Wings background service...${NC}"
+    systemctl enable --now wings
+    systemctl status wings --no-pager
+    pause
+}
+
+wings_service_stop() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Nothing to stop.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Stopping Wings background service...${NC}"
+    systemctl stop wings
+    echo -e "${BGREEN}>>> Wings background service stopped.${NC}"
+    pause
+}
+
+wings_service_restart() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Restarting Wings background service...${NC}"
+    systemctl restart wings
+    systemctl status wings --no-pager
+    pause
+}
+
+wings_service_status() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Wings Service Status ---${NC}"
+    echo ""
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found.${NC}"
+    else
+        systemctl status wings --no-pager
+    fi
+    pause
+}
+
+wings_background_service_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Wings Background Service ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Start"
+        echo -e "  ${BCYAN}2)${NC} Stop"
+        echo -e "  ${BCYAN}3)${NC} Restart"
+        echo -e "  ${BCYAN}4)${NC} Status"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" wbg_choice
+
+        case "$wbg_choice" in
+            1) wings_service_start ;;
+            2) wings_service_stop ;;
+            3) wings_service_restart ;;
+            4) wings_service_status ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
 wings_setup_menu() {
     while true; do
         banner
@@ -703,6 +911,7 @@ wings_setup_menu() {
         echo -e "  ${BCYAN}1)${NC} Wings install + docker + fix"
         echo -e "  ${BCYAN}2)${NC} Wings config setup"
         echo -e "  ${BCYAN}3)${NC} Run Wings"
+        echo -e "  ${BCYAN}4)${NC} Wings Background Service"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" wings_choice
@@ -711,6 +920,7 @@ wings_setup_menu() {
             1) run_wings_install_docker_fix ;;
             2) run_wings_config ;;
             3) run_wings_menu ;;
+            4) wings_background_service_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
