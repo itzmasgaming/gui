@@ -2,7 +2,7 @@
 #
 # ============================================================
 #  MAS Gui - Pterodactyl Panel + Wings installer/manager
-#  Run with: bash <(curl -s https://raw.githubusercontent.com/<you>/<repo>/main/mas-gui.sh)
+#  Run with: bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas)
 # ============================================================
 
 # ---------------- COLORS (bright variants) ----------------
@@ -78,9 +78,6 @@ check_root() {
 }
 
 # Fixes "System locale encoding is not UTF-8" FATAL errors from Blueprint.
-# Just exporting LC_ALL=C.UTF-8 isn't always enough on minimal Docker images
-# where the locales package is stripped down - this actually generates and
-# registers a real UTF-8 locale system-wide, once, for the whole script.
 fix_locale() {
     if ! locale -a 2>/dev/null | grep -qi "en_US.utf8\|en_US.UTF-8"; then
         apt-get install -y locales >/dev/null 2>&1
@@ -91,6 +88,24 @@ fix_locale() {
     fi
     export LANG=en_US.UTF-8
     export LC_ALL=en_US.UTF-8
+}
+
+# Generates a random 6-char code and requires the user to type it back
+# exactly before a destructive action proceeds. Returns 0 if confirmed.
+confirm_destructive() {
+    local label="$1"
+    local code
+    code=$(tr -dc 'A-Z0-9' </dev/urandom | head -c 6)
+    echo ""
+    echo -e "${BRED}${BOLD}!!! WARNING !!!${NC} This will uninstall: ${YELLOW}${label}${NC}"
+    echo -e "${BRED}To confirm, type this exact code: ${YELLOW}${code}${NC}"
+    read -rp "$(echo -e ${BCYAN}"Confirmation code: "${NC})" input_code
+    if [ "$input_code" != "$code" ]; then
+        echo -e "${BRED}Code did not match. Aborted.${NC}"
+        sleep 2
+        return 1
+    fi
+    return 0
 }
 
 # ============================================================
@@ -266,12 +281,217 @@ run_reinstall() {
     pause
 }
 
+# ============================================================
+# PANEL - user management (php artisan p:user:make / p:user:delete)
+# ============================================================
+require_panel_installed() {
+    if [ ! -f "$PTERODACTYL_DIR/artisan" ]; then
+        echo -e "${BRED}Pterodactyl Panel not found at ${PTERODACTYL_DIR}. Install it first.${NC}"
+        pause
+        return 1
+    fi
+    return 0
+}
+
+user_create() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Create New User ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Email: "${NC})" u_email
+    read -rp "$(echo -e ${YELLOW}"Username: "${NC})" u_username
+    read -rp "$(echo -e ${YELLOW}"First name: "${NC})" u_first
+    read -rp "$(echo -e ${YELLOW}"Last name: "${NC})" u_last
+
+    if [ -z "$u_email" ] || [ -z "$u_username" ] || [ -z "$u_first" ] || [ -z "$u_last" ]; then
+        echo -e "${BRED}All fields are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    read -rp "$(echo -e ${YELLOW}"Make this user an admin? (y/n): "${NC})" u_admin_ans
+    local admin_flag="0"
+    [[ "$u_admin_ans" =~ ^[Yy]$ ]] && admin_flag="1"
+
+    echo ""
+    echo -e "${YELLOW}Password: set one now, or leave the user without a password (Panel emails a set-password link, requires mail configured)?${NC}"
+    read -rp "$(echo -e ${YELLOW}"Set password now? (y/n): "${NC})" u_setpass_ans
+
+    cd "$PTERODACTYL_DIR" || return
+    echo ""
+    echo -e "${BCYAN}>>> Creating user...${NC}"
+    if [[ "$u_setpass_ans" =~ ^[Yy]$ ]]; then
+        read -srp "$(echo -e ${YELLOW}"Password: "${NC})" u_pass
+        echo ""
+        php artisan p:user:make --email="$u_email" --username="$u_username" --name-first="$u_first" --name-last="$u_last" --password="$u_pass" --admin="$admin_flag"
+    else
+        php artisan p:user:make --email="$u_email" --username="$u_username" --name-first="$u_first" --name-last="$u_last" --no-password --admin="$admin_flag"
+    fi
+
+    echo ""
+    echo -e "${BGREEN}>>> User creation attempted - check output above for success/errors.${NC}"
+    pause
+}
+
+user_delete() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Delete User ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username / email / UUID of user to delete: "${NC})" u_target
+
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    confirm_destructive "User: $u_target" || return
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan p:user:delete --user="$u_target"
+
+    echo ""
+    echo -e "${BGREEN}>>> Delete attempted - check output above (a user with active servers cannot be deleted).${NC}"
+    pause
+}
+
+# NOTE: Pterodactyl has no official "p:user:update" artisan command - only
+# p:user:make (create) and p:user:delete exist. These two actions update the
+# existing user record directly through Laravel's own Eloquent model via
+# `artisan tinker`, which is the standard safe way to do this outside the
+# admin web UI (passwords are still hashed by the framework, not stored raw).
+user_toggle_admin() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Toggle Admin Status ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username or email: "${NC})" u_target
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan tinker --execute="\$u = \Pterodactyl\Models\User::where('email','$u_target')->orWhere('username','$u_target')->first(); if(\$u){ \$u->root_admin = !\$u->root_admin; \$u->save(); echo 'Admin status is now: '.(\$u->root_admin ? 'ADMIN' : 'NOT ADMIN'); } else { echo 'User not found'; }"
+
+    echo ""
+    pause
+}
+
+user_reset_password() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Reset User Password ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username or email: "${NC})" u_target
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+    read -srp "$(echo -e ${YELLOW}"New password: "${NC})" u_newpass
+    echo ""
+    if [ -z "$u_newpass" ]; then
+        echo -e "${BRED}Password is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan tinker --execute="\$u = \Pterodactyl\Models\User::where('email','$u_target')->orWhere('username','$u_target')->first(); if(\$u){ \$u->password = Hash::make('$u_newpass'); \$u->save(); echo 'Password updated.'; } else { echo 'User not found'; }"
+
+    echo ""
+    pause
+}
+
+user_edit_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Edit User ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Toggle Admin (make admin / remove admin)"
+        echo -e "  ${BCYAN}2)${NC} Reset Password"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" e_choice
+
+        case "$e_choice" in
+            1) user_toggle_admin ;;
+            2) user_reset_password ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+setup_users_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Setup Users ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Create new user"
+        echo -e "  ${BCYAN}2)${NC} Delete user"
+        echo -e "  ${BCYAN}3)${NC} Edit user"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" su_choice
+
+        case "$su_choice" in
+            1) user_create ;;
+            2) user_delete ;;
+            3) user_edit_menu ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# PANEL - maintenance mode + info
+# ============================================================
+panel_maintenance_toggle() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Maintenance Mode ---${NC}"
+    echo ""
+    cd "$PTERODACTYL_DIR" || return
+    if [ -f "$PTERODACTYL_DIR/storage/framework/down" ]; then
+        echo -e "${YELLOW}Panel is currently DOWN (maintenance mode).${NC}"
+        read -rp "$(echo -e ${YELLOW}"Bring it back UP? (y/n): "${NC})" ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            php artisan up
+            echo -e "${BGREEN}>>> Panel is now UP.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Panel is currently UP.${NC}"
+        read -rp "$(echo -e ${YELLOW}"Put it into maintenance mode (DOWN)? (y/n): "${NC})" ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            php artisan down
+            echo -e "${BGREEN}>>> Panel is now DOWN (maintenance mode).${NC}"
+        fi
+    fi
+    pause
+}
+
+panel_info() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Panel Info ---${NC}"
+    echo ""
+    cd "$PTERODACTYL_DIR" || return
+    php artisan p:info
+    pause
+}
+
 panel_setup_menu() {
     while true; do
         banner
         echo -e "${BRED}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
         echo -e "  ${BCYAN}1)${NC} Pterodactyl install"
         echo -e "  ${BCYAN}2)${NC} Pterodactyl reinstall"
+        echo -e "  ${BCYAN}3)${NC} Setup Users"
+        echo -e "  ${BCYAN}4)${NC} Maintenance Mode"
+        echo -e "  ${BCYAN}5)${NC} Panel Info"
         echo -e "  ${BRED}0)${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" sub_choice
@@ -279,10 +499,14 @@ panel_setup_menu() {
         case "$sub_choice" in
             1) run_install ;;
             2) run_reinstall ;;
+            3) setup_users_menu ;;
+            4) panel_maintenance_toggle ;;
+            5) panel_info ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
     done
+
 }
 
 # ============================================================
@@ -842,22 +1066,16 @@ blueprint_menu() {
 }
 
 # ============================================================
-# INSTALLED APPS
+# INSTALLED APPS (status check, reused by Uninstall menu too)
 # ============================================================
-run_installed_apps() {
-    banner
-    echo -e "${BCYAN}${BOLD}--- Installed Apps ---${NC}"
-    echo ""
-
+print_installed_status() {
     if command -v cloudflared >/dev/null 2>&1; then
         cf_status="Not running"
         cf_color="${BRED}"
         if [ -f /etc/systemd/system/cloudflared.service ] && [ "$(systemctl is-active cloudflared 2>/dev/null)" = "active" ]; then
-            cf_status="Running"
-            cf_color="${YELLOW}"
+            cf_status="Running"; cf_color="${YELLOW}"
         elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
-            cf_status="Running"
-            cf_color="${YELLOW}"
+            cf_status="Running"; cf_color="${YELLOW}"
         fi
         echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${cf_color}${cf_status}${NC}"
     else
@@ -883,11 +1101,9 @@ run_installed_apps() {
         wings_status="Not running"
         wings_color="${BRED}"
         if [ -f /etc/systemd/system/wings.service ] && [ "$(systemctl is-active wings 2>/dev/null)" = "active" ]; then
-            wings_status="Running"
-            wings_color="${YELLOW}"
+            wings_status="Running"; wings_color="${YELLOW}"
         elif pgrep -x "wings" >/dev/null 2>&1; then
-            wings_status="Running"
-            wings_color="${YELLOW}"
+            wings_status="Running"; wings_color="${YELLOW}"
         fi
         echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${wings_color}${wings_status}${NC}"
     else
@@ -905,8 +1121,151 @@ run_installed_apps() {
     else
         echo -e "${WHITE}Blueprint:${NC} ${BRED}Not installed${NC}"
     fi
+}
 
+run_installed_apps() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Installed Apps ---${NC}"
+    echo ""
+    print_installed_status
     pause
+}
+
+# ============================================================
+# UNINSTALL
+# ============================================================
+uninstall_pterodactyl_panel() {
+    confirm_destructive "Pterodactyl Panel (files, nginx site, queue worker)" || return
+    echo -e "${BCYAN}>>> Uninstalling Pterodactyl Panel...${NC}"
+    systemctl stop pteroq 2>/dev/null
+    systemctl disable pteroq 2>/dev/null
+    rm -f /etc/systemd/system/pteroq.service
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf /etc/nginx/sites-available/pterodactyl.conf
+    systemctl reload nginx 2>/dev/null
+    (crontab -l 2>/dev/null | grep -v "pterodactyl" | crontab -) 2>/dev/null
+    rm -rf /var/www/pterodactyl
+    rm -f /app
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Pterodactyl Panel uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_wings_docker() {
+    confirm_destructive "Wings + Docker (binary, config, service, docker itself)" || return
+    echo -e "${BCYAN}>>> Uninstalling Wings + Docker...${NC}"
+    systemctl stop wings 2>/dev/null
+    systemctl disable wings 2>/dev/null
+    rm -f /etc/systemd/system/wings.service
+    rm -f /usr/local/bin/wings
+    rm -rf /etc/pterodactyl
+    rm -rf /etc/certs
+
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Wings + Docker uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_cloudflare() {
+    confirm_destructive "Cloudflare tunnel (cloudflared binary + service)" || return
+    echo -e "${BCYAN}>>> Uninstalling Cloudflare...${NC}"
+    pkill -f "cloudflared tunnel" 2>/dev/null
+    systemctl stop cloudflared 2>/dev/null
+    systemctl disable cloudflared 2>/dev/null
+    rm -f /etc/systemd/system/cloudflared.service
+    apt-get purge -y cloudflared 2>/dev/null
+    rm -f /usr/bin/cloudflared /usr/local/bin/cloudflared
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Cloudflare uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_blueprint() {
+    confirm_destructive "Blueprint Framework (extensions, themes, CLI)" || return
+    echo -e "${BCYAN}>>> Uninstalling Blueprint...${NC}"
+    rm -rf /var/www/pterodactyl/.blueprint
+    rm -f /var/www/pterodactyl/blueprint.sh
+    rm -f /usr/local/bin/blueprint
+    echo -e "${BGREEN}>>> Blueprint uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_everything() {
+    confirm_destructive "EVERYTHING (Panel, Wings, Docker, Cloudflare, Blueprint) - System Update is NOT touched" || return
+    echo ""
+    echo -e "${BRED}${BOLD}>>> Uninstalling everything...${NC}"
+    echo ""
+
+    echo -e "${BCYAN}>>> Removing Blueprint...${NC}"
+    rm -rf /var/www/pterodactyl/.blueprint
+    rm -f /var/www/pterodactyl/blueprint.sh
+    rm -f /usr/local/bin/blueprint
+
+    echo -e "${BCYAN}>>> Removing Pterodactyl Panel...${NC}"
+    systemctl stop pteroq 2>/dev/null
+    systemctl disable pteroq 2>/dev/null
+    rm -f /etc/systemd/system/pteroq.service
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf /etc/nginx/sites-available/pterodactyl.conf
+    systemctl reload nginx 2>/dev/null
+    (crontab -l 2>/dev/null | grep -v "pterodactyl" | crontab -) 2>/dev/null
+    rm -rf /var/www/pterodactyl
+    rm -f /app
+
+    echo -e "${BCYAN}>>> Removing Wings + Docker...${NC}"
+    systemctl stop wings 2>/dev/null
+    systemctl disable wings 2>/dev/null
+    rm -f /etc/systemd/system/wings.service
+    rm -f /usr/local/bin/wings
+    rm -rf /etc/pterodactyl
+    rm -rf /etc/certs
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+
+    echo -e "${BCYAN}>>> Removing Cloudflare...${NC}"
+    pkill -f "cloudflared tunnel" 2>/dev/null
+    systemctl stop cloudflared 2>/dev/null
+    systemctl disable cloudflared 2>/dev/null
+    rm -f /etc/systemd/system/cloudflared.service
+    apt-get purge -y cloudflared 2>/dev/null
+    rm -f /usr/bin/cloudflared /usr/local/bin/cloudflared
+
+    systemctl daemon-reload
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> Everything uninstalled. System Update was not touched.${NC}"
+    pause
+}
+
+uninstall_menu() {
+    while true; do
+        banner
+        echo -e "${BRED}${BOLD}--- Uninstall ---${NC}"
+        echo ""
+        print_installed_status
+        echo ""
+        echo -e "  ${BCYAN}1)${NC} Uninstall Pterodactyl Panel"
+        echo -e "  ${BCYAN}2)${NC} Uninstall Wings + Docker"
+        echo -e "  ${BCYAN}3)${NC} Uninstall Cloudflare"
+        echo -e "  ${BCYAN}4)${NC} Uninstall Blueprint"
+        echo -e "  ${BRED}5)${NC} Uninstall Everything"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" un_choice
+
+        case "$un_choice" in
+            1) uninstall_pterodactyl_panel ;;
+            2) uninstall_wings_docker ;;
+            3) uninstall_cloudflare ;;
+            4) uninstall_blueprint ;;
+            5) uninstall_everything ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 # ============================================================
@@ -935,6 +1294,7 @@ show_menu() {
     echo -e "  ${BCYAN}6)${NC} Blueprint + Themes (Fixed)"
     echo -e "  ${BCYAN}7)${NC} Installed Apps"
     echo -e "  ${BCYAN}8)${NC} Credits"
+    echo -e "  ${BCYAN}9)${NC} Uninstall"
     echo -e "  ${BRED}0)${NC} Exit"
     echo ""
     read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" choice
@@ -948,6 +1308,7 @@ show_menu() {
         6) blueprint_menu ;;
         7) run_installed_apps ;;
         8) show_credits ;;
+        9) uninstall_menu ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
