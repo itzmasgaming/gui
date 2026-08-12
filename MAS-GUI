@@ -1,0 +1,1666 @@
+#!/bin/bash
+#
+# ============================================================
+#  MAS Gui - Pterodactyl Panel + Wings installer/manager
+#  Run with: bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas)
+# ============================================================
+
+# ---------------- COLORS (bright variants) ----------------
+RED='\033[0;31m'
+BRED='\033[1;91m'
+GREEN='\033[0;32m'
+BGREEN='\033[1;92m'
+YELLOW='\033[1;33m'
+BYELLOW='\033[1;93m'
+BLUE='\033[0;34m'
+BBLUE='\033[1;94m'
+BCYAN='\033[0;36m'
+WHITE='\033[1;37m'
+BBCYAN='\033[1;96m'
+MAGENTA='\033[0;35m'
+BMAGENTA='\033[1;95m'
+BOLD='\033[1m'
+HIDDEN='\033[8m'   # conceal - text present in output, invisible in most terminals
+NC='\033[0m' # No Color
+
+# Hidden watermark (present in every run's output, invisible unless selected/copied)
+_WM_B64="U3ViIEl0ek1BU0dhbWluZw=="
+WATERMARK="${HIDDEN}$(echo "$_WM_B64" | base64 -d 2>/dev/null)${NC}"
+
+# Set to 1 during unattended multi-step flows (e.g. All-in-One Setup) to skip
+# "press ENTER to continue" prompts between steps.
+SKIP_PAUSE=0
+
+# ============ CONFIG - EDIT THESE ============
+# ---- Panel config ----
+CFG_TIMEZONE="Asia/Kolkata"
+CFG_EMAIL=""                              # LE / panel email - prompted at runtime
+CFG_ADMIN_FIRSTNAME="Admin"
+CFG_ADMIN_LASTNAME="User"
+CFG_FQDN="cold-rabbit-94.telebit.io"
+
+CFG_DB_NAME=""
+CFG_DB_USER=""
+CFG_DB_PASS=""
+CFG_UFW="n"
+CFG_LETSENCRYPT="y"
+CFG_AGREE_HTTPS="y"
+CFG_PROCEED_ANYWAY="y"
+CFG_TELEMETRY="yes"
+CFG_CONTINUE_INSTALL="y"
+CFG_AGREE_TOS="y"
+CFG_ASSUME_SSL="y"
+
+PANEL_INSTALLER_URL="https://pterodactyl-installer.se/"
+PTERODACTYL_DIR="/var/www/pterodactyl"
+# ===============================================
+
+# ---------------- HELPERS ----------------
+banner() {
+    clear
+    echo -e "$WATERMARK"
+
+    tag="ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ"
+    echo -e "${BRED}${tag}${NC}"
+
+    echo -e "${BCYAN}${BOLD}============================================${NC}"
+    echo -e "${BRED}${BOLD}                MAS Gui${NC}"
+    echo -e "${BCYAN}${BOLD}============================================${NC}"
+    echo ""
+}
+
+pause() {
+    if [ "$SKIP_PAUSE" = "1" ]; then
+        return
+    fi
+    echo ""
+    read -rp "$(echo -e ${BYELLOW}"Press ENTER to return to the menu..."${NC})" _
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${BRED}This script must be run as root. Try: sudo bash $0${NC}"
+        exit 1
+    fi
+}
+
+# Fixes "System locale encoding is not UTF-8" FATAL errors from Blueprint.
+fix_locale() {
+    if ! locale -a 2>/dev/null | grep -qi "en_US.utf8\|en_US.UTF-8"; then
+        apt-get install -y locales >/dev/null 2>&1
+        sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen 2>/dev/null
+        grep -q "^en_US.UTF-8 UTF-8" /etc/locale.gen 2>/dev/null || echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+        locale-gen en_US.UTF-8 >/dev/null 2>&1
+        update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 >/dev/null 2>&1
+    fi
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+}
+
+# Generates a random 6-char code and requires the user to type it back
+# exactly before a destructive action proceeds. Returns 0 if confirmed.
+confirm_destructive() {
+    local label="$1"
+    local code
+    code=$(tr -dc 'A-Z0-9' </dev/urandom | head -c 6)
+    echo ""
+    echo -e "${BRED}${BOLD}!!! WARNING !!!${NC} This will uninstall: ${YELLOW}${label}${NC}"
+    echo -e "${BRED}To confirm, type this exact code: ${YELLOW}${code}${NC}"
+    read -rp "$(echo -e ${BCYAN}"Confirmation code: "${NC})" input_code
+    if [ "$input_code" != "$code" ]; then
+        echo -e "${BRED}Code did not match. Aborted.${NC}"
+        sleep 2
+        return 1
+    fi
+    return 0
+}
+
+# ============================================================
+# CLOUDFLARE
+# ============================================================
+install_cloudflare() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Install Cloudflare ---${NC}"
+    echo ""
+
+    if command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${YELLOW}cloudflared is already installed ($(cloudflared --version 2>/dev/null | head -n1)).${NC}"
+        if [ "$SKIP_PAUSE" = "1" ]; then
+            return
+        fi
+        read -rp "$(echo -e ${YELLOW}"Reinstall / redownload it anyway? (y/n): "${NC})" cf_reinstall_ans
+        if [[ ! "$cf_reinstall_ans" =~ ^[Yy]$ ]]; then
+            pause
+            return
+        fi
+    fi
+
+    echo -e "${BCYAN}>>> Installing dependencies (curl)...${NC}"
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl >/dev/null 2>&1
+
+    local cf_arch
+    case "$(uname -m)" in
+        x86_64) cf_arch="amd64" ;;
+        aarch64|arm64) cf_arch="arm64" ;;
+        armv7l) cf_arch="arm" ;;
+        *) cf_arch="amd64" ;;
+    esac
+
+    echo -e "${BCYAN}>>> Downloading cloudflared (${cf_arch})...${NC}"
+    if ! curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
+        echo -e "${BRED}Download failed. Check your network/internet connection and try again.${NC}"
+        pause
+        return
+    fi
+    chmod +x /usr/local/bin/cloudflared
+
+    # Make sure it's on PATH even if /usr/local/bin isn't (also drop a copy at /usr/bin,
+    # since uninstall_cloudflare cleans up both locations).
+    ln -sf /usr/local/bin/cloudflared /usr/bin/cloudflared 2>/dev/null
+
+    if command -v cloudflared >/dev/null 2>&1; then
+        echo ""
+        echo -e "${BGREEN}>>> cloudflared installed successfully: $(cloudflared --version 2>/dev/null | head -n1)${NC}"
+        echo -e "${BGREEN}>>> You can now use 'Run in terminal' or 'Run in background' from the Cloudflare menu.${NC}"
+    else
+        echo -e "${BRED}Something went wrong - cloudflared is still not on PATH.${NC}"
+    fi
+    pause
+}
+
+run_cloudflare_foreground() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
+        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
+        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
+            install_cloudflare
+        fi
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            pause
+            return
+        fi
+    fi
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
+    if [ -z "$cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting.${NC}"
+        pause
+        return
+    fi
+    echo ""
+    echo -e "${BCYAN}>>> Running Cloudflare tunnel in terminal (foreground)...${NC}"
+    echo -e "${YELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop the tunnel.${NC}"
+    echo ""
+    sleep 1
+    cloudflared tunnel run --protocol http2 --token "$cf_token"
+    pause
+}
+
+run_cloudflare_background() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
+        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
+        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
+            install_cloudflare
+        fi
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            pause
+            return
+        fi
+    fi
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
+    if [ -z "$cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${BCYAN}>>> Creating cloudflared.service...${NC}"
+    cat <<SERVICE_EOF > /etc/systemd/system/cloudflared.service
+[Unit]
+Description=Cloudflare Tunnel
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/cloudflared tunnel run --protocol http2 --token $cf_token
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    systemctl daemon-reload
+    systemctl enable --now cloudflared
+    systemctl status cloudflared --no-pager
+
+    echo ""
+    echo -e "${BCYAN}>>> Cloudflare tunnel running in background. Check logs anytime with:${NC}"
+    echo -e "    ${YELLOW}journalctl -u cloudflared -f${NC}"
+    pause
+}
+
+# ---- Cloudflare background service control (start/stop/restart/status) ----
+cloudflare_service_start() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Run 'Run in background (systemd)' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Cloudflare background service...${NC}"
+    systemctl enable --now cloudflared
+    systemctl status cloudflared --no-pager
+    pause
+}
+
+cloudflare_service_stop() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Nothing to stop.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Stopping Cloudflare background service...${NC}"
+    systemctl stop cloudflared
+    echo -e "${BGREEN}>>> Cloudflare background service stopped.${NC}"
+    pause
+}
+
+cloudflare_service_restart() {
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found. Run 'Run in background (systemd)' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Restarting Cloudflare background service...${NC}"
+    systemctl restart cloudflared
+    systemctl status cloudflared --no-pager
+    pause
+}
+
+cloudflare_service_status() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Cloudflare Service Status ---${NC}"
+    echo ""
+    if [ ! -f /etc/systemd/system/cloudflared.service ]; then
+        echo -e "${BRED}cloudflared.service not found.${NC}"
+    else
+        systemctl status cloudflared --no-pager
+    fi
+    pause
+}
+
+cloudflare_background_service_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Cloudflare Background Service ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Start"
+        echo -e "  ${BCYAN}2)${NC} Stop"
+        echo -e "  ${BCYAN}3)${NC} Restart"
+        echo -e "  ${BCYAN}4)${NC} Status"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" cfbg_choice
+
+        case "$cfbg_choice" in
+            1) cloudflare_service_start ;;
+            2) cloudflare_service_stop ;;
+            3) cloudflare_service_restart ;;
+            4) cloudflare_service_status ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+cloudflare_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Cloudflare ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Install Cloudflare"
+        echo -e "  ${BCYAN}2)${NC} Run in terminal (foreground)"
+        echo -e "  ${BCYAN}3)${NC} Run in background (systemd)"
+        echo -e "  ${BCYAN}4)${NC} Cloudflare Background Service"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" cf_choice
+
+        case "$cf_choice" in
+            1) install_cloudflare ;;
+            2) run_cloudflare_foreground ;;
+            3) run_cloudflare_background ;;
+            4) cloudflare_background_service_menu ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# PANEL - build answer sequences
+# ============================================================
+build_answers_fresh_install() {
+    cat <<EOF
+0
+$CFG_DB_NAME
+$CFG_DB_USER
+$CFG_DB_PASS
+$CFG_TIMEZONE
+$CFG_EMAIL
+$CFG_ADMIN_EMAIL
+$CFG_ADMIN_USERNAME
+$CFG_ADMIN_FIRSTNAME
+$CFG_ADMIN_LASTNAME
+$CFG_ADMIN_PASSWORD
+$CFG_FQDN
+$CFG_UFW
+$CFG_LETSENCRYPT
+$CFG_AGREE_HTTPS
+$CFG_PROCEED_ANYWAY
+$CFG_TELEMETRY
+$CFG_CONTINUE_INSTALL
+$CFG_AGREE_TOS
+$CFG_ASSUME_SSL
+EOF
+}
+
+build_answers_reinstall() {
+    cat <<EOF
+0
+y
+$CFG_DB_NAME
+$CFG_DB_USER
+$CFG_DB_PASS
+$CFG_TIMEZONE
+$CFG_EMAIL
+$CFG_ADMIN_EMAIL
+$CFG_ADMIN_USERNAME
+$CFG_ADMIN_FIRSTNAME
+$CFG_ADMIN_LASTNAME
+$CFG_ADMIN_PASSWORD
+$CFG_FQDN
+$CFG_UFW
+$CFG_LETSENCRYPT
+$CFG_AGREE_HTTPS
+$CFG_PROCEED_ANYWAY
+$CFG_TELEMETRY
+$CFG_CONTINUE_INSTALL
+$CFG_AGREE_TOS
+$CFG_ASSUME_SSL
+EOF
+}
+
+prompt_admin_details() {
+    echo ""
+    echo -e "${BCYAN}>>> Enter Panel admin account details (press ENTER to use default)${NC}"
+    read -rp "$(echo -e ${YELLOW}"Let's Encrypt / Panel email [default: admin@gmail.com]: "${NC})" CFG_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin email [default: admin@admin.com]: "${NC})" CFG_ADMIN_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin username [default: admin]: "${NC})" CFG_ADMIN_USERNAME
+    read -srp "$(echo -e ${YELLOW}"Admin password [default: 12345678]: "${NC})" CFG_ADMIN_PASSWORD
+    echo ""
+
+    CFG_EMAIL="${CFG_EMAIL:-admin@gmail.com}"
+    CFG_ADMIN_EMAIL="${CFG_ADMIN_EMAIL:-admin@admin.com}"
+    CFG_ADMIN_USERNAME="${CFG_ADMIN_USERNAME:-admin}"
+    CFG_ADMIN_PASSWORD="${CFG_ADMIN_PASSWORD:-12345678}"
+
+    return 0
+}
+
+run_install() {
+    prompt_admin_details || return
+    echo ""
+    echo -e "${BGREEN}>>> Starting fresh Pterodactyl Panel install...${NC}"
+    echo ""
+    build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
+    pause
+}
+
+run_reinstall() {
+    prompt_admin_details || return
+    echo ""
+    echo -e "${BYELLOW}>>> Reinstalling Pterodactyl Panel (will confirm overwrite)...${NC}"
+    echo ""
+    build_answers_reinstall | bash <(curl -s "$PANEL_INSTALLER_URL")
+    pause
+}
+
+# ============================================================
+# PANEL - user management (php artisan p:user:make / p:user:delete)
+# ============================================================
+require_panel_installed() {
+    if [ ! -f "$PTERODACTYL_DIR/artisan" ]; then
+        echo -e "${BRED}Pterodactyl Panel not found at ${PTERODACTYL_DIR}. Install it first.${NC}"
+        pause
+        return 1
+    fi
+    return 0
+}
+
+user_create() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Create New User ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Email: "${NC})" u_email
+    read -rp "$(echo -e ${YELLOW}"Username: "${NC})" u_username
+    read -rp "$(echo -e ${YELLOW}"First name: "${NC})" u_first
+    read -rp "$(echo -e ${YELLOW}"Last name: "${NC})" u_last
+
+    if [ -z "$u_email" ] || [ -z "$u_username" ] || [ -z "$u_first" ] || [ -z "$u_last" ]; then
+        echo -e "${BRED}All fields are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    read -rp "$(echo -e ${YELLOW}"Make this user an admin? (y/n): "${NC})" u_admin_ans
+    local admin_flag="0"
+    [[ "$u_admin_ans" =~ ^[Yy]$ ]] && admin_flag="1"
+
+    echo ""
+    echo -e "${YELLOW}Password: set one now, or leave the user without a password (Panel emails a set-password link, requires mail configured)?${NC}"
+    read -rp "$(echo -e ${YELLOW}"Set password now? (y/n): "${NC})" u_setpass_ans
+
+    cd "$PTERODACTYL_DIR" || return
+    echo ""
+    echo -e "${BCYAN}>>> Creating user...${NC}"
+    if [[ "$u_setpass_ans" =~ ^[Yy]$ ]]; then
+        read -srp "$(echo -e ${YELLOW}"Password: "${NC})" u_pass
+        echo ""
+        php artisan p:user:make --email="$u_email" --username="$u_username" --name-first="$u_first" --name-last="$u_last" --password="$u_pass" --admin="$admin_flag"
+    else
+        php artisan p:user:make --email="$u_email" --username="$u_username" --name-first="$u_first" --name-last="$u_last" --no-password --admin="$admin_flag"
+    fi
+
+    echo ""
+    echo -e "${BGREEN}>>> User creation attempted - check output above for success/errors.${NC}"
+    pause
+}
+
+user_delete() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Delete User ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username / email / UUID of user to delete: "${NC})" u_target
+
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    confirm_destructive "User: $u_target" || return
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan p:user:delete --user="$u_target"
+
+    echo ""
+    echo -e "${BGREEN}>>> Delete attempted - check output above (a user with active servers cannot be deleted).${NC}"
+    pause
+}
+
+# NOTE: Pterodactyl has no official "p:user:update" artisan command - only
+# p:user:make (create) and p:user:delete exist. These two actions update the
+# existing user record directly through Laravel's own Eloquent model via
+# `artisan tinker`, which is the standard safe way to do this outside the
+# admin web UI (passwords are still hashed by the framework, not stored raw).
+user_toggle_admin() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Toggle Admin Status ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username or email: "${NC})" u_target
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan tinker --execute="\$u = \Pterodactyl\Models\User::where('email','$u_target')->orWhere('username','$u_target')->first(); if(\$u){ \$u->root_admin = !\$u->root_admin; \$u->save(); echo 'Admin status is now: '.(\$u->root_admin ? 'ADMIN' : 'NOT ADMIN'); } else { echo 'User not found'; }"
+
+    echo ""
+    pause
+}
+
+user_reset_password() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Reset User Password ---${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Username or email: "${NC})" u_target
+    if [ -z "$u_target" ]; then
+        echo -e "${BRED}A value is required. Aborting.${NC}"
+        pause
+        return
+    fi
+    read -srp "$(echo -e ${YELLOW}"New password: "${NC})" u_newpass
+    echo ""
+    if [ -z "$u_newpass" ]; then
+        echo -e "${BRED}Password is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    cd "$PTERODACTYL_DIR" || return
+    php artisan tinker --execute="\$u = \Pterodactyl\Models\User::where('email','$u_target')->orWhere('username','$u_target')->first(); if(\$u){ \$u->password = Hash::make('$u_newpass'); \$u->save(); echo 'Password updated.'; } else { echo 'User not found'; }"
+
+    echo ""
+    pause
+}
+
+user_edit_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Edit User ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Toggle Admin (make admin / remove admin)"
+        echo -e "  ${BCYAN}2)${NC} Reset Password"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" e_choice
+
+        case "$e_choice" in
+            1) user_toggle_admin ;;
+            2) user_reset_password ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+setup_users_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Setup Users ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Create new user"
+        echo -e "  ${BCYAN}2)${NC} Delete user"
+        echo -e "  ${BCYAN}3)${NC} Edit user"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" su_choice
+
+        case "$su_choice" in
+            1) user_create ;;
+            2) user_delete ;;
+            3) user_edit_menu ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# PANEL - maintenance mode + info
+# ============================================================
+panel_maintenance_toggle() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Maintenance Mode ---${NC}"
+    echo ""
+    cd "$PTERODACTYL_DIR" || return
+    if [ -f "$PTERODACTYL_DIR/storage/framework/down" ]; then
+        echo -e "${YELLOW}Panel is currently DOWN (maintenance mode).${NC}"
+        read -rp "$(echo -e ${YELLOW}"Bring it back UP? (y/n): "${NC})" ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            php artisan up
+            echo -e "${BGREEN}>>> Panel is now UP.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Panel is currently UP.${NC}"
+        read -rp "$(echo -e ${YELLOW}"Put it into maintenance mode (DOWN)? (y/n): "${NC})" ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            php artisan down
+            echo -e "${BGREEN}>>> Panel is now DOWN (maintenance mode).${NC}"
+        fi
+    fi
+    pause
+}
+
+panel_info() {
+    require_panel_installed || return
+    banner
+    echo -e "${BCYAN}${BOLD}--- Panel Info ---${NC}"
+    echo ""
+    cd "$PTERODACTYL_DIR" || return
+    php artisan p:info
+    pause
+}
+
+panel_setup_menu() {
+    while true; do
+        banner
+        echo -e "${BRED}${BOLD}--- Pterodactyl Panel Setup ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Pterodactyl install"
+        echo -e "  ${BCYAN}2)${NC} Pterodactyl reinstall"
+        echo -e "  ${BCYAN}3)${NC} Setup Users"
+        echo -e "  ${BCYAN}4)${NC} Maintenance Mode"
+        echo -e "  ${BCYAN}5)${NC} Panel Info"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" sub_choice
+
+        case "$sub_choice" in
+            1) run_install ;;
+            2) run_reinstall ;;
+            3) setup_users_menu ;;
+            4) panel_maintenance_toggle ;;
+            5) panel_info ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+
+}
+
+# ============================================================
+# WINGS - install + docker + fix
+# ============================================================
+run_wings_install_docker_fix() {
+    echo ""
+    echo -e "${BGREEN}>>> Wings install + docker + fix - starting...${NC}"
+    echo ""
+
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker/daemon.json
+    apt-mark unhold docker-ce docker-ce-cli containerd.io 2>/dev/null
+
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update
+
+    mkdir -p /etc/docker
+    cat <<'EOF' > /etc/docker/daemon.json
+{
+  "storage-driver": "vfs"
+}
+EOF
+
+    SAFE_CONTAINERD=$(apt-cache madison containerd.io | grep -m 1 '1.6.' | awk '{print $3}')
+    DOCKER_VER=$(apt-cache madison docker-ce | grep -m 1 '5:26.' | awk '{print $3}')
+    CLI_VER=$(apt-cache madison docker-ce-cli | grep -m 1 '5:26.' | awk '{print $3}')
+    apt-get install -y --allow-downgrades containerd.io="$SAFE_CONTAINERD" docker-ce="$DOCKER_VER" docker-ce-cli="$CLI_VER" docker-compose-plugin
+    apt-mark hold containerd.io docker-ce docker-ce-cli
+
+    systemctl enable --now containerd docker
+    docker run hello-world
+
+    cat <<'EOF' > /etc/docker/daemon.json
+{
+  "storage-driver": "vfs",
+  "iptables": true,
+  "dns": [
+    "1.1.1.1",
+    "8.8.8.8"
+  ]
+}
+EOF
+    systemctl restart docker
+
+    mkdir -p /etc/pterodactyl
+    curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")"
+    chmod u+x /usr/local/bin/wings
+
+    mkdir -p /etc/certs && cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 -subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" -keyout privkey.pem -out fullchain.pem
+
+    cd /etc/pterodactyl
+    docker network create --driver=bridge pterodactyl0 2>/dev/null || true
+
+    echo ""
+    echo -e "${BGREEN}>>> Wings install + docker + fix complete.${NC}"
+    pause
+}
+
+# ============================================================
+# WINGS - config setup
+# ============================================================
+run_wings_config() {
+    echo ""
+    echo -e "${BCYAN}>>> Wings Config Setup${NC}"
+    echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
+    read -rp "$(echo -e ${YELLOW}"Token ID: "${NC})" w_token_id
+    read -rp "$(echo -e ${YELLOW}"Token: "${NC})" w_token
+    read -rp "$(echo -e ${YELLOW}"Panel URL (remote link, e.g. https://cold-rabbit-94.telebit.io): "${NC})" w_remote
+
+    if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ] || [ -z "$w_remote" ]; then
+        echo -e "${BRED}All four fields are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    mkdir -p /etc/pterodactyl
+
+    cat <<EOF > /etc/pterodactyl/config.yml
+debug: false
+uuid: $w_uuid
+token_id: $w_token_id
+token: $w_token
+api:
+  host: 0.0.0.0
+  port: 8443
+  ssl:
+    enabled: true
+    cert: /etc/certs/fullchain.pem
+    key: /etc/certs/privkey.pem
+  upload_limit: 100
+system:
+  data: /var/lib/pterodactyl/volumes
+  sftp:
+    bind_port: 2022
+allowed_mounts: []
+remote: '$w_remote'
+docker:
+  network:
+    name: pterodactyl_nw
+    interfaces:
+      v4:
+        subnet: 10.240.0.0/16
+        gateway: 10.240.0.1
+EOF
+
+    echo ""
+    echo -e "${BGREEN}>>> Config written to /etc/pterodactyl/config.yml${NC}"
+    echo ""
+    echo -e "${BCYAN}>>> Creating wings.service...${NC}"
+    cat <<'SERVICE_EOF' > /etc/systemd/system/wings.service
+[Unit]
+Description=Pterodactyl Wings Daemon
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=root
+WorkingDirectory=/etc/pterodactyl
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    systemctl daemon-reload
+
+    echo ""
+    echo -e "${BGREEN}>>> wings.service created. Go to Wings Setup -> Run Wings to start it.${NC}"
+    pause
+}
+
+run_wings_foreground() {
+    echo ""
+    echo -e "${BCYAN}>>> Running Wings in terminal (foreground)...${NC}"
+    echo -e "${BYELLOW}>>> Press Ctrl+C to stop. Closing this terminal will stop Wings.${NC}"
+    echo ""
+    sleep 1
+    /usr/local/bin/wings
+    pause
+}
+
+run_wings_background() {
+    echo ""
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first (option 2).${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Wings in background via systemd...${NC}"
+    systemctl enable --now wings
+    systemctl status wings --no-pager
+    echo ""
+    echo -e "${BGREEN}>>> Wings is running in the background. Check logs anytime with:${NC}"
+    echo -e "    ${YELLOW}journalctl -u wings -f${NC}"
+    pause
+}
+
+run_wings_menu() {
+    while true; do
+        banner
+        echo -e "${BRED}${BOLD}--- Run Wings ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Run in terminal (foreground)"
+        echo -e "  ${BCYAN}2)${NC} Run in background (systemd)"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" run_choice
+
+        case "$run_choice" in
+            1) run_wings_foreground ;;
+            2) run_wings_background ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ---- Wings background service control (start/stop/restart/status) ----
+wings_service_start() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Starting Wings background service...${NC}"
+    systemctl enable --now wings
+    systemctl status wings --no-pager
+    pause
+}
+
+wings_service_stop() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Nothing to stop.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Stopping Wings background service...${NC}"
+    systemctl stop wings
+    echo -e "${BGREEN}>>> Wings background service stopped.${NC}"
+    pause
+}
+
+wings_service_restart() {
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found. Run 'Wings config setup' first to create it.${NC}"
+        pause
+        return
+    fi
+    echo -e "${BCYAN}>>> Restarting Wings background service...${NC}"
+    systemctl restart wings
+    systemctl status wings --no-pager
+    pause
+}
+
+wings_service_status() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Wings Service Status ---${NC}"
+    echo ""
+    if [ ! -f /etc/systemd/system/wings.service ]; then
+        echo -e "${BRED}wings.service not found.${NC}"
+    else
+        systemctl status wings --no-pager
+    fi
+    pause
+}
+
+wings_background_service_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Wings Background Service ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Start"
+        echo -e "  ${BCYAN}2)${NC} Stop"
+        echo -e "  ${BCYAN}3)${NC} Restart"
+        echo -e "  ${BCYAN}4)${NC} Status"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" wbg_choice
+
+        case "$wbg_choice" in
+            1) wings_service_start ;;
+            2) wings_service_stop ;;
+            3) wings_service_restart ;;
+            4) wings_service_status ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+wings_setup_menu() {
+    while true; do
+        banner
+        echo -e "${BRED}${BOLD}--- Wings Setup ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Wings install + docker + fix"
+        echo -e "  ${BCYAN}2)${NC} Wings config setup"
+        echo -e "  ${BCYAN}3)${NC} Run Wings"
+        echo -e "  ${BCYAN}4)${NC} Wings Background Service"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" wings_choice
+
+        case "$wings_choice" in
+            1) run_wings_install_docker_fix ;;
+            2) run_wings_config ;;
+            3) run_wings_menu ;;
+            4) wings_background_service_menu ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# SYSTEM UPDATE
+# ============================================================
+run_system_update() {
+    banner
+    echo -e "${BRED}${BOLD}--- System Update ---${NC}"
+    echo ""
+    echo -e "${BCYAN}>>> Running apt update...${NC}"
+    apt update
+    echo ""
+    echo -e "${BCYAN}>>> Running apt upgrade -y...${NC}"
+    apt upgrade -y
+    echo ""
+    echo -e "${BRED}>>> System update complete.${NC}"
+    pause
+}
+
+# ============================================================
+# SYSTEM SPEC
+# ============================================================
+run_system_spec() {
+    banner
+    echo -e "${BRED}${BOLD}--- System Spec ---${NC}"
+    echo ""
+
+    cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d':' -f2 | sed 's/^ *//')
+    [ -z "$cpu_model" ] && cpu_model="Unknown"
+
+    if [ -f /sys/fs/cgroup/cpuset.cpus.effective ]; then
+        core_range=$(cat /sys/fs/cgroup/cpuset.cpus.effective)
+    elif [ -f /sys/fs/cgroup/cpuset/cpuset.cpus ]; then
+        core_range=$(cat /sys/fs/cgroup/cpuset/cpuset.cpus)
+    else
+        core_range=$(grep "Cpus_allowed_list" /proc/self/status | awk '{print $2}')
+    fi
+    [ -z "$core_range" ] && core_range="Unknown"
+
+    thread_count=$(nproc)
+
+    mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    mem_total_gb=$(awk "BEGIN {printf \"%.0f\", $mem_total_kb*1024/1000000000}")
+    mem_avail_gb=$(awk "BEGIN {printf \"%.0f\", $mem_avail_kb*1024/1000000000}")
+    mem_used_gb=$(awk "BEGIN {printf \"%.0f\", $mem_total_gb-$mem_avail_gb}")
+
+    read -r _ total_b used_b avail_b _ < <(df -B1 / | tail -1)
+    storage_total_gb=$(awk "BEGIN {printf \"%.0f\", $total_b/1000000000}")
+    storage_used_gb=$(awk "BEGIN {printf \"%.0f\", $used_b/1000000000}")
+    storage_avail_gb=$(awk "BEGIN {printf \"%.0f\", $avail_b/1000000000}")
+
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)
+        [ -z "$gpu_info" ] && gpu_info="NVIDIA tools present but no GPU detected"
+    else
+        gpu_info="No GPU detected / nvidia-smi not installed"
+    fi
+
+    if command -v uptime >/dev/null 2>&1; then
+        runtime_info=$(uptime -p 2>/dev/null)
+    fi
+    if [ -z "$runtime_info" ]; then
+        up_seconds=$(awk '{print int($1)}' /proc/uptime)
+        runtime_info="${up_seconds}s"
+    fi
+
+    echo -e "${BCYAN}CPU Model:${NC}        $cpu_model"
+    echo -e "${BCYAN}Cores/Threads:${NC}    $thread_count"
+    echo -e "${BCYAN}Core/Thread Range:${NC} $core_range  ${YELLOW}(as allowed by Docker cgroup)${NC}"
+    echo ""
+    echo -e "${BCYAN}RAM Total:${NC}        ${mem_total_gb} GB"
+    echo -e "${BCYAN}RAM Used:${NC}         ${mem_used_gb} GB"
+    echo -e "${BCYAN}RAM Available:${NC}    ${mem_avail_gb} GB"
+    echo ""
+    echo -e "${BCYAN}Storage Total:${NC}    ${storage_total_gb} GB"
+    echo -e "${BCYAN}Storage Used:${NC}     ${storage_used_gb} GB"
+    echo -e "${BCYAN}Storage Available:${NC} ${storage_avail_gb} GB"
+    echo ""
+    echo -e "${BCYAN}GPU:${NC}              $gpu_info"
+    echo ""
+    echo -e "${BCYAN}Uptime:${NC}           $runtime_info"
+
+    pause
+}
+
+# ============================================================
+# BLUEPRINT & THEMES
+# ============================================================
+run_blueprint_install() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Blueprint Install ---${NC}"
+    echo ""
+
+    echo -e "${BCYAN}>>> Running system update first...${NC}"
+    apt update
+    apt upgrade -y
+
+    export PTERODACTYL_DIRECTORY=/var/www/pterodactyl
+
+    echo -e "${BCYAN}>>> Installing curl wget unzip...${NC}"
+    apt install -y curl wget unzip
+
+    cd "$PTERODACTYL_DIRECTORY"
+
+    echo -e "${BCYAN}>>> Downloading Blueprint release...${NC}"
+    wget "https://github.com/BlueprintFramework/framework/releases/latest/download/release.zip" -O "$PTERODACTYL_DIRECTORY/release.zip"
+    unzip -o release.zip
+
+    echo -e "${BCYAN}>>> Installing base packages...${NC}"
+    apt install -y ca-certificates curl git gnupg unzip wget zip
+
+    echo -e "${BCYAN}>>> Setting up NodeSource repo + Node 22...${NC}"
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
+    apt update
+    apt install -y nodejs
+
+    cd "$PTERODACTYL_DIRECTORY"
+    echo -e "${BCYAN}>>> Installing yarn + running yarn install...${NC}"
+    npm i -g yarn
+    yarn install
+
+    touch "$PTERODACTYL_DIRECTORY/.blueprintrc"
+    echo \
+'WEBUSER="www-data";
+OWNERSHIP="www-data:www-data";
+USERSHELL="/bin/bash";' > "$PTERODACTYL_DIRECTORY/.blueprintrc"
+
+    echo -e "${BCYAN}>>> Writing and running master_fix.sh...${NC}"
+
+    cat << 'EOF' > /var/www/pterodactyl/master_fix.sh
+#!/bin/bash
+set -e
+
+PTERODACTYL_DIR="/var/www/pterodactyl"
+
+echo -e "\e[34m[1/8] Setting UTF-8 Environment Locales...\e[0m"
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
+echo -e "\e[34m[2/8] Cleaning up Blueprint locks and stray files...\e[0m"
+rm -f "${PTERODACTYL_DIR}/.blueprint/lock"
+rm -f "${PTERODACTYL_DIR}/.blueprint/tmp"* -rf
+rm -f "${PTERODACTYL_DIR}/^C"
+rm -f "${PTERODACTYL_DIR}/nebula.blueprint"
+
+echo -e "\e[34m[3/8] Restoring Blueprint tracking structure...\e[0m"
+mkdir -p "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db"
+mkdir -p "${PTERODACTYL_DIR}/.blueprint/tmp"
+
+if [ ! -f "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/extensionfs.php" ]; then
+    echo '<?php return [];' > "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/extensionfs.php"
+fi
+
+touch "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db/installed_extensions"
+touch "${PTERODACTYL_DIR}/.blueprint/extensions/blueprint/private/db/version"
+
+echo -e "\e[34m[4/8] Aligning system symlinks...\e[0m"
+ln -sf "${PTERODACTYL_DIR}" /app
+
+echo -e "\e[34m[5/8] Running database migrations & bringing panel live...\e[0m"
+cd "${PTERODACTYL_DIR}"
+php artisan down || true
+php artisan migrate --step --force
+php artisan up
+
+echo -e "\e[34m[6/8] Compiling frontend assets with legacy OpenSSL engine...\e[0m"
+export NODE_OPTIONS=--openssl-legacy-provider
+yarn build:production
+
+echo -e "\e[34m[7/8] Flushing application caches...\e[0m"
+php artisan optimize:clear
+php artisan config:clear
+php artisan view:clear
+php artisan route:clear
+
+echo -e "\e[34m[8/8] Re-applying file permissions...\e[0m"
+chown -R www-data:www-data "${PTERODACTYL_DIR}"
+chmod -R 755 "${PTERODACTYL_DIR}/storage" "${PTERODACTYL_DIR}/bootstrap/cache"
+
+echo -e "\e[32m========================================================\e[0m"
+echo -e "\e[32m SUCCESS: System repaired, compiled, and ready for use! \e[0m"
+echo -e "\e[32m========================================================\e[0m"
+EOF
+
+    chmod +x /var/www/pterodactyl/master_fix.sh
+    /var/www/pterodactyl/master_fix.sh
+
+    echo ""
+    echo -e "${BCYAN}>>> Running Blueprint's official installer...${NC}"
+    export NODE_OPTIONS=--openssl-legacy-provider
+
+    mkdir -p /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug
+    touch /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug/logs.txt
+
+    chmod +x /var/www/pterodactyl/blueprint.sh
+    yes | /var/www/pterodactyl/blueprint.sh
+
+    echo ""
+    echo -e "${BCYAN}>>> Fixing blueprint CLI shortcut permissions...${NC}"
+    chmod +x /usr/local/bin/blueprint 2>/dev/null
+
+    echo -e "${BCYAN}>>> Running blueprint -upgrade...${NC}"
+    blueprint -upgrade
+
+    echo ""
+    echo -e "${BCYAN}>>> Blueprint install + repair complete.${NC}"
+    pause
+}
+
+clear_blueprint_lock() {
+    rm -f "$PTERODACTYL_DIR/.blueprint/lock" 2>/dev/null
+}
+
+run_theme_nebula() {
+    echo ""
+    echo -e "${BCYAN}>>> Nebula auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/nebula.blueprint
+    if [ ! -s nebula.blueprint ]; then
+        echo -e "${BRED}Download failed (file missing/empty). Aborting install.${NC}"
+        sleep 2
+        return
+    fi
+    clear_blueprint_lock
+    yes "" | blueprint -i nebula
+    rm -f nebula.blueprint
+
+    echo -e "${BGREEN}>>> Nebula installed!${NC}"
+    sleep 2
+}
+
+run_theme_euphoria() {
+    echo ""
+    echo -e "${BCYAN}>>> Euphoria auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/euphoriatheme.blueprint
+    if [ ! -s euphoriatheme.blueprint ]; then
+        echo -e "${BRED}Download failed (file missing/empty). Aborting install.${NC}"
+        sleep 2
+        return
+    fi
+    clear_blueprint_lock
+    blueprint -i euphoriatheme
+    rm -f euphoriatheme.blueprint
+
+    echo -e "${BGREEN}>>> Euphoria installed!${NC}"
+    sleep 2
+}
+
+run_theme_add_tool() {
+    echo ""
+    echo -e "${BCYAN}>>> Add Tool auto-install starting...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/versionchanger.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/mcplugins.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/sagaminecraftplayermanager.blueprint
+    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/huxregister.blueprint
+
+    for f in versionchanger.blueprint mcplugins.blueprint sagaminecraftplayermanager.blueprint huxregister.blueprint; do
+        if [ ! -s "$f" ]; then
+            echo -e "${BRED}Download failed for $f (missing/empty). Skipping.${NC}"
+        fi
+    done
+
+    if [ -s versionchanger.blueprint ]; then clear_blueprint_lock; blueprint -i versionchanger; fi
+    if [ -s mcplugins.blueprint ]; then clear_blueprint_lock; blueprint -i mcplugins; fi
+    if [ -s sagaminecraftplayermanager.blueprint ]; then clear_blueprint_lock; blueprint -i sagaminecraftplayermanager; fi
+    if [ -s huxregister.blueprint ]; then clear_blueprint_lock; blueprint -i huxregister.blueprint; fi
+
+    rm -f versionchanger.blueprint mcplugins.blueprint sagaminecraftplayermanager.blueprint huxregister.blueprint
+
+    echo -e "${BGREEN}>>> Add Tool package installed!${NC}"
+    sleep 2
+}
+
+theme_uninstall_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Uninstall Menu ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Remove Nebula"
+        echo -e "  ${BCYAN}2)${NC} Remove Euphoria"
+        echo -e "  ${BCYAN}3)${NC} Remove Add Tool Package"
+        echo -e "  ${BRED}0)${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" uopt
+
+        case "$uopt" in
+            1)
+                echo -e "${BCYAN}>>> Removing Nebula...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r nebula
+                echo -e "${BGREEN}>>> Nebula removed!${NC}"
+                sleep 2
+                ;;
+            2)
+                echo -e "${BCYAN}>>> Removing Euphoria...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r euphoriatheme
+                echo -e "${BGREEN}>>> Euphoria removed!${NC}"
+                sleep 2
+                ;;
+            3)
+                echo -e "${BCYAN}>>> Removing Add Tool package...${NC}"
+                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
+                blueprint -r versionchanger
+                blueprint -r mcplugins
+                blueprint -r sagaminecraftplayermanager
+                echo -e "${BGREEN}>>> Add Tool package removed!${NC}"
+                sleep 2
+                ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+theme_installer_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Themes & Extensions Installer ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Nebula (Auto Install)"
+        echo -e "  ${BCYAN}2)${NC} Euphoria (Auto Install)"
+        echo -e "  ${BCYAN}3)${NC} Uninstall"
+        echo -e "  ${BCYAN}4)${NC} Add Tool (Auto Install)"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" theme_choice
+
+        case "$theme_choice" in
+            1) run_theme_nebula ;;
+            2) run_theme_euphoria ;;
+            3) theme_uninstall_menu ;;
+            4) run_theme_add_tool ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+blueprint_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}--- Blueprint & Themes ---${NC}"
+        echo -e "  ${BCYAN}1)${NC} Blueprint install (fixed)"
+        echo -e "  ${BCYAN}2)${NC} Themes + Extensions Installer"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" bp_choice
+
+        case "$bp_choice" in
+            1) run_blueprint_install ;;
+            2) theme_installer_menu ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# ALL-IN-ONE SETUP
+# ============================================================
+progress_bar() {
+    local step=$1
+    local total=$2
+    local label=$3
+    local pct=$((step * 100 / total))
+    local filled=$((pct / 5))
+    local empty=$((20 - filled))
+    local bar=""
+    local i
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    echo ""
+    echo -e "${BGREEN}${BOLD}[${bar}] ${pct}% - [${step}/${total}] ${label}${NC}"
+    echo ""
+}
+
+prompt_all_in_one_details() {
+    echo ""
+    echo -e "${BCYAN}${BOLD}>>> Enter everything needed up front (press ENTER for default)${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Let's Encrypt / Panel email [default: admin@gmail.com]: "${NC})" CFG_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin email [default: admin@admin.com]: "${NC})" CFG_ADMIN_EMAIL
+    read -rp "$(echo -e ${YELLOW}"Admin username [default: admin]: "${NC})" CFG_ADMIN_USERNAME
+    read -srp "$(echo -e ${YELLOW}"Admin password [default: 12345678]: "${NC})" CFG_ADMIN_PASSWORD
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"FQDN / domain [default: ${CFG_FQDN}]: "${NC})" aio_fqdn
+    read -rp "$(echo -e ${YELLOW}"Timezone [default: ${CFG_TIMEZONE}]: "${NC})" aio_tz
+
+    CFG_EMAIL="${CFG_EMAIL:-admin@gmail.com}"
+    CFG_ADMIN_EMAIL="${CFG_ADMIN_EMAIL:-admin@admin.com}"
+    CFG_ADMIN_USERNAME="${CFG_ADMIN_USERNAME:-admin}"
+    CFG_ADMIN_PASSWORD="${CFG_ADMIN_PASSWORD:-12345678}"
+    CFG_FQDN="${aio_fqdn:-$CFG_FQDN}"
+    CFG_TIMEZONE="${aio_tz:-$CFG_TIMEZONE}"
+
+    return 0
+}
+
+run_all_in_one_setup() {
+    banner
+    echo -e "${BRED}${BOLD}--- All-in-One Setup ---${NC}"
+    echo ""
+    echo -e "${YELLOW}This installs, in order: Pterodactyl Panel, Wings + Docker, Blueprint, Nebula theme, Cloudflare.${NC}"
+    echo -e "${YELLOW}It does NOT run Wings config setup - that needs a Node UUID/token generated inside the${NC}"
+    echo -e "${YELLOW}Panel after it's up, so it has to be done manually afterwards (Wings Setup -> Wings config setup).${NC}"
+    echo ""
+    read -rp "$(echo -e ${BCYAN}"Continue? (y/n): "${NC})" aio_confirm
+    if [[ ! "$aio_confirm" =~ ^[Yy]$ ]]; then
+        return
+    fi
+
+    prompt_all_in_one_details || return
+
+    SKIP_PAUSE=1
+
+    progress_bar 1 5 "Installing Pterodactyl Panel..."
+    build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
+
+    progress_bar 2 5 "Installing Wings + Docker..."
+    run_wings_install_docker_fix
+
+    progress_bar 3 5 "Installing Blueprint..."
+    run_blueprint_install
+
+    progress_bar 4 5 "Installing Nebula theme..."
+    run_theme_nebula
+
+    progress_bar 5 5 "Installing Cloudflare..."
+    install_cloudflare
+
+    SKIP_PAUSE=0
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}============================================${NC}"
+    echo -e "${BGREEN}${BOLD} All-in-One Setup complete!${NC}"
+    echo -e "${BGREEN}${BOLD}============================================${NC}"
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo -e "  1) Create a Node in the Panel admin area to get a UUID/token"
+    echo -e "  2) Run: Wings Setup -> Wings config setup, using those values"
+    echo -e "  3) Run: Cloudflare -> Run in terminal/background, using your tunnel token"
+    pause
+}
+
+# ============================================================
+# INSTALLED APPS (status check, reused by Uninstall menu too)
+# ============================================================
+print_installed_status() {
+    local cf_ok=0 panel_ok=0 docker_ok=0 wings_ok=0 blueprint_ok=0 theme_ok=0
+
+    if command -v cloudflared >/dev/null 2>&1; then
+        cf_ok=1
+        cf_status="Not running"
+        cf_color="${BRED}"
+        if [ -f /etc/systemd/system/cloudflared.service ] && [ "$(systemctl is-active cloudflared 2>/dev/null)" = "active" ]; then
+            cf_status="Running"; cf_color="${YELLOW}"
+        elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
+            cf_status="Running"; cf_color="${YELLOW}"
+        fi
+        echo -e "${WHITE}Cloudflare:${NC} ${YELLOW}Installed${NC} - ${cf_color}${cf_status}${NC}"
+    else
+        echo -e "${WHITE}Cloudflare:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if [ -f /var/www/pterodactyl/artisan ]; then
+        panel_ok=1
+        echo -e "${WHITE}Pterodactyl Panel:${NC} ${YELLOW}Installed${NC}"
+    else
+        echo -e "${WHITE}Pterodactyl Panel:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        docker_ok=1
+        docker_status=$(systemctl is-active docker 2>/dev/null)
+        docker_color="${BRED}"
+        [ "$docker_status" = "active" ] && docker_color="${YELLOW}"
+        echo -e "${WHITE}Docker:${NC} ${YELLOW}Installed${NC} - ${docker_color}${docker_status:-Not running}${NC}"
+    else
+        echo -e "${WHITE}Docker:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if [ -f /usr/local/bin/wings ]; then
+        wings_ok=1
+        wings_status="Not running"
+        wings_color="${BRED}"
+        if [ -f /etc/systemd/system/wings.service ] && [ "$(systemctl is-active wings 2>/dev/null)" = "active" ]; then
+            wings_status="Running"; wings_color="${YELLOW}"
+        elif pgrep -x "wings" >/dev/null 2>&1; then
+            wings_status="Running"; wings_color="${YELLOW}"
+        fi
+        echo -e "${WHITE}Wings:${NC} ${YELLOW}Installed${NC} - ${wings_color}${wings_status}${NC}"
+    else
+        echo -e "${WHITE}Wings:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if [ -f /etc/pterodactyl/config.yml ]; then
+        echo -e "${WHITE}Wings config:${NC} ${YELLOW}Present${NC}"
+    else
+        echo -e "${WHITE}Wings config:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if [ -d /var/www/pterodactyl/.blueprint ]; then
+        blueprint_ok=1
+        echo -e "${WHITE}Blueprint:${NC} ${YELLOW}Installed${NC}"
+    else
+        echo -e "${WHITE}Blueprint:${NC} ${BRED}Not installed${NC}"
+    fi
+
+    if grep -q "nebula" /var/www/pterodactyl/.blueprint/extensions/blueprint/private/db/installed_extensions 2>/dev/null; then
+        theme_ok=1
+        echo -e "${WHITE}Theme (Nebula):${NC} ${YELLOW}Installed${NC}"
+    else
+        echo -e "${WHITE}Theme (Nebula):${NC} ${BRED}Not installed${NC}"
+    fi
+
+    echo ""
+    if [ "$cf_ok" = "1" ] && [ "$panel_ok" = "1" ] && [ "$docker_ok" = "1" ] && [ "$wings_ok" = "1" ] && [ "$blueprint_ok" = "1" ] && [ "$theme_ok" = "1" ]; then
+        echo -e "${BGREEN}${BOLD}>>> Hosting complete! All core components are installed.${NC}"
+    else
+        echo -e "${YELLOW}Not everything is installed yet. If a component looks installed but something${NC}"
+        echo -e "${YELLOW}still isn't working right, it's most likely a config issue (Wings config, DNS,${NC}"
+        echo -e "${YELLOW}SSL, or Panel node setup) rather than a missing install.${NC}"
+    fi
+}
+
+run_installed_apps() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Installed Apps ---${NC}"
+    echo ""
+    print_installed_status
+    pause
+}
+
+# ============================================================
+# UNINSTALL
+# ============================================================
+uninstall_pterodactyl_panel() {
+    confirm_destructive "Pterodactyl Panel (files, nginx site, queue worker)" || return
+    echo -e "${BCYAN}>>> Uninstalling Pterodactyl Panel...${NC}"
+    systemctl stop pteroq 2>/dev/null
+    systemctl disable pteroq 2>/dev/null
+    rm -f /etc/systemd/system/pteroq.service
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf /etc/nginx/sites-available/pterodactyl.conf
+    systemctl reload nginx 2>/dev/null
+    (crontab -l 2>/dev/null | grep -v "pterodactyl" | crontab -) 2>/dev/null
+    rm -rf /var/www/pterodactyl
+    rm -f /app
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Pterodactyl Panel uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_wings_docker() {
+    confirm_destructive "Wings + Docker (binary, config, service, docker itself)" || return
+    echo -e "${BCYAN}>>> Uninstalling Wings + Docker...${NC}"
+    systemctl stop wings 2>/dev/null
+    systemctl disable wings 2>/dev/null
+    rm -f /etc/systemd/system/wings.service
+    rm -f /usr/local/bin/wings
+    rm -rf /etc/pterodactyl
+    rm -rf /etc/certs
+
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Wings + Docker uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_cloudflare() {
+    confirm_destructive "Cloudflare tunnel (cloudflared binary + service)" || return
+    echo -e "${BCYAN}>>> Uninstalling Cloudflare...${NC}"
+    pkill -f "cloudflared tunnel" 2>/dev/null
+    systemctl stop cloudflared 2>/dev/null
+    systemctl disable cloudflared 2>/dev/null
+    rm -f /etc/systemd/system/cloudflared.service
+    apt-get purge -y cloudflared 2>/dev/null
+    rm -f /usr/bin/cloudflared /usr/local/bin/cloudflared
+    systemctl daemon-reload
+    echo -e "${BGREEN}>>> Cloudflare uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_blueprint() {
+    confirm_destructive "Blueprint Framework (extensions, themes, CLI)" || return
+    echo -e "${BCYAN}>>> Uninstalling Blueprint...${NC}"
+    rm -rf /var/www/pterodactyl/.blueprint
+    rm -f /var/www/pterodactyl/blueprint.sh
+    rm -f /usr/local/bin/blueprint
+    echo -e "${BGREEN}>>> Blueprint uninstalled.${NC}"
+    sleep 2
+}
+
+uninstall_everything() {
+    confirm_destructive "EVERYTHING (Panel, Wings, Docker, Cloudflare, Blueprint) - System Update is NOT touched" || return
+    echo ""
+    echo -e "${BRED}${BOLD}>>> Uninstalling everything...${NC}"
+    echo ""
+
+    echo -e "${BCYAN}>>> Removing Blueprint...${NC}"
+    rm -rf /var/www/pterodactyl/.blueprint
+    rm -f /var/www/pterodactyl/blueprint.sh
+    rm -f /usr/local/bin/blueprint
+
+    echo -e "${BCYAN}>>> Removing Pterodactyl Panel...${NC}"
+    systemctl stop pteroq 2>/dev/null
+    systemctl disable pteroq 2>/dev/null
+    rm -f /etc/systemd/system/pteroq.service
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf /etc/nginx/sites-available/pterodactyl.conf
+    systemctl reload nginx 2>/dev/null
+    (crontab -l 2>/dev/null | grep -v "pterodactyl" | crontab -) 2>/dev/null
+    rm -rf /var/www/pterodactyl
+    rm -f /app
+
+    echo -e "${BCYAN}>>> Removing Wings + Docker...${NC}"
+    systemctl stop wings 2>/dev/null
+    systemctl disable wings 2>/dev/null
+    rm -f /etc/systemd/system/wings.service
+    rm -f /usr/local/bin/wings
+    rm -rf /etc/pterodactyl
+    rm -rf /etc/certs
+    systemctl stop docker containerd 2>/dev/null
+    apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io runc crun 2>/dev/null
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+
+    echo -e "${BCYAN}>>> Removing Cloudflare...${NC}"
+    pkill -f "cloudflared tunnel" 2>/dev/null
+    systemctl stop cloudflared 2>/dev/null
+    systemctl disable cloudflared 2>/dev/null
+    rm -f /etc/systemd/system/cloudflared.service
+    apt-get purge -y cloudflared 2>/dev/null
+    rm -f /usr/bin/cloudflared /usr/local/bin/cloudflared
+
+    systemctl daemon-reload
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> Everything uninstalled. System Update was not touched.${NC}"
+    pause
+}
+
+uninstall_menu() {
+    while true; do
+        banner
+        echo -e "${BRED}${BOLD}--- Uninstall ---${NC}"
+        echo ""
+        print_installed_status
+        echo ""
+        echo -e "  ${BCYAN}1)${NC} Uninstall Pterodactyl Panel"
+        echo -e "  ${BCYAN}2)${NC} Uninstall Wings + Docker"
+        echo -e "  ${BCYAN}3)${NC} Uninstall Cloudflare"
+        echo -e "  ${BCYAN}4)${NC} Uninstall Blueprint"
+        echo -e "  ${BRED}5)${NC} Uninstall Everything"
+        echo -e "  ${BRED}0)${NC} Exit"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" un_choice
+
+        case "$un_choice" in
+            1) uninstall_pterodactyl_panel ;;
+            2) uninstall_wings_docker ;;
+            3) uninstall_cloudflare ;;
+            4) uninstall_blueprint ;;
+            5) uninstall_everything ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# CREDITS
+# ============================================================
+show_credits() {
+    banner
+    echo -e "${BCYAN}${BOLD}--- Credits ---${NC}"
+    echo ""
+    echo -e "${WHITE}Docker and Wings fixers given by:${NC} ${YELLOW}Xorvila Team Dev${NC}"
+    echo -e "${WHITE}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ${YELLOW}ItzMASGaming${NC}"
+    echo -e "${WHITE}Blueprint themes provided by:${NC} ${YELLOW}Jishnu/The-Coding-Hub${NC}"
+    pause
+}
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+show_menu() {
+    banner
+    echo -e "  ${BCYAN}1)${NC} System Update"
+    echo -e "  ${BCYAN}2)${NC} Cloudflare"
+    echo -e "  ${BCYAN}3)${NC} Pterodactyl Panel Setup"
+    echo -e "  ${BCYAN}4)${NC} Wings Setup"
+    echo -e "  ${BCYAN}5)${NC} System Spec"
+    echo -e "  ${BCYAN}6)${NC} Blueprint + Themes (Fixed)"
+    echo -e "  ${BCYAN}7)${NC} Installed Apps"
+    echo -e "  ${BCYAN}8)${NC} Credits"
+    echo -e "  ${BCYAN}9)${NC} Uninstall"
+    echo -e "  ${BCYAN}10)${NC} All-in-One Setup"
+    echo -e "  ${BRED}0)${NC} Exit"
+    echo ""
+    read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" choice
+
+    case "$choice" in
+        1) run_system_update ;;
+        2) cloudflare_menu ;;
+        3) panel_setup_menu ;;
+        4) wings_setup_menu ;;
+        5) run_system_spec ;;
+        6) blueprint_menu ;;
+        7) run_installed_apps ;;
+        8) show_credits ;;
+        9) uninstall_menu ;;
+        10) run_all_in_one_setup ;;
+        0) exit 0 ;;
+        *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+    esac
+}
+
+check_root
+fix_locale
+while true; do
+    show_menu
+done
