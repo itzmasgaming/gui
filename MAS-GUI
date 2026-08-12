@@ -2,7 +2,7 @@
 #
 # ============================================================
 #  MAS Gui - Pterodactyl Panel + Wings installer/manager
-#  Run with: bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas)
+#  Run with: bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/MAS-GUI)
 # ============================================================
 
 # ---------------- COLORS (bright variants) ----------------
@@ -1100,6 +1100,8 @@ ln -sf "${PTERODACTYL_DIR}" /app
 echo -e "\e[34m[5/8] Running database migrations & bringing panel live...\e[0m"
 cd "${PTERODACTYL_DIR}"
 php artisan down || true
+php artisan config:clear
+php artisan cache:clear
 php artisan migrate --step --force
 php artisan up
 
@@ -1133,7 +1135,7 @@ EOF
     touch /var/www/pterodactyl/.blueprint/extensions/blueprint/private/debug/logs.txt
 
     chmod +x /var/www/pterodactyl/blueprint.sh
-    yes | /var/www/pterodactyl/blueprint.sh
+    (echo "y"; echo "y") | /var/www/pterodactyl/blueprint.sh
 
     echo ""
     echo -e "${BCYAN}>>> Fixing blueprint CLI shortcut permissions...${NC}"
@@ -1344,7 +1346,13 @@ run_all_in_one_setup() {
     banner
     echo -e "${BRED}${BOLD}--- All-in-One Setup ---${NC}"
     echo ""
-    echo -e "${YELLOW}This installs, in order: Pterodactyl Panel, Wings + Docker, Blueprint, Nebula theme, Cloudflare.${NC}"
+    echo -e "${YELLOW}This runs everything below, in the same order as the main menu:${NC}"
+    echo -e "  ${BCYAN}1)${NC} System Update"
+    echo -e "  ${BCYAN}2)${NC} Cloudflare (install)"
+    echo -e "  ${BCYAN}3)${NC} Pterodactyl Panel install"
+    echo -e "  ${BCYAN}4)${NC} Wings + Docker install"
+    echo -e "  ${BCYAN}5)${NC} Blueprint install (Nebula theme only - no Euphoria/Add Tool)"
+    echo ""
     echo -e "${YELLOW}It does NOT run Wings config setup - that needs a Node UUID/token generated inside the${NC}"
     echo -e "${YELLOW}Panel after it's up, so it has to be done manually afterwards (Wings Setup -> Wings config setup).${NC}"
     echo ""
@@ -1357,20 +1365,24 @@ run_all_in_one_setup() {
 
     SKIP_PAUSE=1
 
-    progress_bar 1 5 "Installing Pterodactyl Panel..."
+    progress_bar 1 6 "System Update..."
+    apt update
+    apt upgrade -y
+
+    progress_bar 2 6 "Installing Cloudflare..."
+    install_cloudflare
+
+    progress_bar 3 6 "Installing Pterodactyl Panel..."
     build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
 
-    progress_bar 2 5 "Installing Wings + Docker..."
+    progress_bar 4 6 "Installing Wings + Docker..."
     run_wings_install_docker_fix
 
-    progress_bar 3 5 "Installing Blueprint..."
+    progress_bar 5 6 "Installing Blueprint..."
     run_blueprint_install
 
-    progress_bar 4 5 "Installing Nebula theme..."
+    progress_bar 6 6 "Installing Nebula theme..."
     run_theme_nebula
-
-    progress_bar 5 5 "Installing Cloudflare..."
-    install_cloudflare
 
     SKIP_PAUSE=0
 
