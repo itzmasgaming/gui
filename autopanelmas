@@ -1,79 +1,177 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# mas-gui-wrapper.sh
+# ------------------
+# A menu-driven wrapper around ItzMASGaming's MAS installer scripts that
+# automates the repetitive keypresses, while still stopping to ask YOU for
+# the real secrets (Cloudflare token, node UUID/token/panel URL) instead of
+# baking anything sensitive into the script itself.
+#
+# IMPORTANT: I could not fetch the actual MAS/Mas script source to verify the
+# exact prompt order/count, so the answer arrays below are built from your
+# transcript. Run it once, watch the output, and adjust ANSWERS_PANEL /
+# ANSWERS_WINGS below if a step lands one "Enter" early/late. Search for
+# "ADJUST HERE" to find the two arrays.
+#
+# Usage: bash mas-gui-wrapper.sh
+#
+set -uo pipefail
 
-# Clear screen
-clear
-echo "=========================================="
-echo "   MasGaming Auto Setup Script"
-echo "=========================================="
-echo ""
+# Safety net: if this file gets *sourced* (e.g. `. mas-gui-wrapper.sh` or
+# `source mas-gui-wrapper.sh`) instead of run as its own process
+# (`bash mas-gui-wrapper.sh`), a bare `exit` would kill the parent shell and
+# close your whole terminal/sshx session. Detect that and use `return`
+# instead in that case.
+if (return 0 2>/dev/null); then
+  IS_SOURCED=1
+else
+  IS_SOURCED=0
+fi
 
-# Ask for Cloudflare Token first
-read -p "Enter Cloudflare TOKEN: " CF_TOKEN
-echo "Starting initial phase..."
+safe_exit() {
+  if [[ "$IS_SOURCED" -eq 1 ]]; then
+    return "${1:-0}"
+  else
+    exit "${1:-0}"
+  fi
+}
 
-# Define the sequence up until the panel setup
-(
-    echo "3"; sleep 1
-    echo "1"; sleep 2
-    echo ""; sleep 1 
-    echo ""; sleep 1 
-    echo ""; sleep 1 
-    echo ""; sleep 1 
-    echo ""; sleep 2 
-    echo "0"; sleep 1
-    echo "1"; sleep 1
-    echo ""; sleep 1
-    echo "2"; sleep 1
-    echo "1"; sleep 1
-    echo ""; sleep 2
-    echo "3"; sleep 1
-    echo "$CF_TOKEN"; sleep 2
-    echo "0"; sleep 1
-    echo "6"; sleep 1
-    echo "1"; sleep 1
-    echo "y"; sleep 1
-    echo "y"; sleep 1
-    echo ""; sleep 5 
-    echo "2"; sleep 1
-    echo "1"; sleep 1
-    echo "0"; sleep 1
-    echo "0"; sleep 1
-    echo "4"; sleep 1
-    echo "1"; sleep 1
-    echo ""; sleep 2
-    echo "2"; sleep 1
-) | bash <(curl -s https://githubusercontent.com)
+PANEL_SCRIPT_URL="https://raw.githubusercontent.com/itzmasgaming/gui/main/MAS"
+WINGS_SCRIPT_URL="https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas"
+WORKDIR="$(mktemp -d)"
 
-# Pause to let user configure the Panel
-echo ""
-echo "=================================================================="
-echo "⚠️  PAUSED: ACTION REQUIRED IN YOUR BROWSER"
-echo "=================================================================="
-echo "1. Log into your Panel with these credentials:"
-echo "   - Username: Admin"
-echo "   - Password: 12345678"
-echo "2. Create a node."
-echo "   (Note: Daemon Port is 8443, change this in Cloudflare too)"
-echo "3. Copy the Node configuration details."
-echo "=================================================================="
-echo ""
+cleanup() { rm -rf "$WORKDIR"; }
+trap cleanup EXIT
 
-# Grab credentials from keyboard input
-read -p "Enter Node UUID: " NODE_UUID < /dev/tty
-read -p "Enter Node Token ID: " NODE_TOKEN_ID < /dev/tty
-read -p "Enter Node Token: " NODE_TOKEN < /dev/tty
-read -p "Enter Panel URL: " PANEL_URL < /dev/tty
+fetch_script() {
+  # $1 = url, $2 = output path
+  if ! curl -fsSL "$1" -o "$2"; then
+    echo "Failed to download $1 — check the URL/branch and your network." >&2
+    exit 1
+  fi
+  chmod +x "$2"
+}
 
-echo ""
-echo "Resuming automation to start Wings... Do not press Ctrl+C."
-echo "=========================================="
+run_with_answers() {
+  # $1 = script path, remaining args = answers to feed line by line
+  local script_path="$1"; shift
+  local answers=("$@")
+  {
+    for a in "${answers[@]}"; do
+      printf '%s\n' "$a"
+    done
+    # After answers are exhausted, leave stdin open/attached so any final
+    # foreground process (e.g. wings) keeps running normally instead of
+    # getting an EOF-triggered exit.
+    cat
+  } | bash "$script_path"
+}
 
-# Final execution sequence using the newly gathered variables
-(
-    echo "$NODE_UUID"; sleep 1
-    echo "$NODE_TOKEN_ID"; sleep 1
-    echo "$NODE_TOKEN"; sleep 1
-    echo "$PANEL_URL"; sleep 2
-    echo "3"; sleep 1
-    echo "1"; sleep 1
-) | bash <(curl -s https://githubusercontent.com)
+panel_setup() {
+  echo
+  read -rsp "Enter your Cloudflare tunnel token: " CF_TOKEN
+  echo
+  if [[ -z "$CF_TOKEN" ]]; then
+    echo "No token entered, aborting." >&2
+    return 1
+  fi
+
+  local script_path="$WORKDIR/MAS.sh"
+  echo "Downloading panel installer..."
+  fetch_script "$PANEL_SCRIPT_URL" "$script_path"
+
+  # ADJUST HERE — panel/auto-setup answer sequence
+  local ANSWERS_PANEL=(
+    "3"
+    "1"
+    ""    # enter x4 block
+    ""
+    ""
+    ""
+    ""    # "enter for left only"
+    "0"
+    "1"
+    ""
+    "2"
+    "1"
+    ""
+    "3"
+    "$CF_TOKEN"
+    ""
+    "0"
+    "6"
+    "1"
+    "y"
+    "y"
+    ""
+    "2"
+    "1"
+    "0"
+    "0"
+  )
+
+  echo "Running panel auto-setup..."
+  run_with_answers "$script_path" "${ANSWERS_PANEL[@]}"
+}
+
+wings_setup() {
+  echo
+  echo "Log into the panel first (default admin / 12345678 unless you changed it),"
+  echo "create a node (remember: set Daemon Port to 8443 and match it in Cloudflare),"
+  echo "then copy the UUID, Token ID, Token, and Panel URL from that node."
+  echo
+
+  read -rp  "Node UUID: "        NODE_UUID
+  read -rp  "Token ID: "         NODE_TOKEN_ID
+  read -rsp "Token: "            NODE_TOKEN; echo
+  read -rp  "Panel URL: "        PANEL_URL
+
+  if [[ -z "$NODE_UUID" || -z "$NODE_TOKEN_ID" || -z "$NODE_TOKEN" || -z "$PANEL_URL" ]]; then
+    echo "One or more fields were empty, aborting." >&2
+    return 1
+  fi
+
+  local script_path="$WORKDIR/Mas.sh"
+  echo "Downloading wings installer..."
+  fetch_script "$WINGS_SCRIPT_URL" "$script_path"
+
+  # ADJUST HERE — wings setup answer sequence
+  local ANSWERS_WINGS=(
+    "4"
+    "1"
+    ""
+    "2"
+    "$NODE_UUID"
+    "$NODE_TOKEN_ID"
+    "$NODE_TOKEN"
+    "$PANEL_URL"
+    ""
+    "3"
+    "1"
+  )
+
+  echo "Running wings setup. Once wings starts, DO NOT press Ctrl+C — it needs to"
+  echo "keep running in this terminal (foreground). Open a new terminal/tab for"
+  echo "anything else."
+  run_with_answers "$script_path" "${ANSWERS_WINGS[@]}"
+}
+
+main_menu() {
+  while true; do
+    echo
+    echo "==== MAS GUI Wrapper ===="
+    echo "1) Auto Panel Setup"
+    echo "2) Wings Setup"
+    echo "0) Exit"
+    read -rp "Choose an option: " choice
+    case "$choice" in
+      1) panel_setup ;;
+      2) wings_setup ;;
+      0) break ;;
+      *) echo "Invalid option." ;;
+    esac
+  done
+}
+
+main_menu
+safe_exit 0
