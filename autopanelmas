@@ -1,113 +1,79 @@
-#!/usr/bin/env bash
-# Automates the MAS GUI (itzmasgaming) Pterodactyl installer.
-# Requires `expect`. Installs it automatically if missing (Debian/Ubuntu).
-#
-# WHAT THIS DOES:
-#   - Replays your menu selections automatically (3, 1, enters, 0,1,2,1, etc.)
-#   - Feeds in your Cloudflare tunnel token when asked
-#   - PAUSES once, because creating a node in the panel's web UI can't be
-#     scripted — you log in, make the node, then paste back 4 values here
-#   - Resumes and hands control to the terminal once Wings starts (no auto Ctrl+C)
-#
-# Review the installer source yourself before running this, it's an
-# unofficial third-party script: 
-#   curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas | less
-#
-# Default panel login is Admin / 12345678 — change that password the moment
-# you're inside the panel.
+#!/bin/bash
 
-set -euo pipefail
+# Clear screen
+clear
+echo "=========================================="
+echo "   MasGaming Auto Setup Script"
+echo "=========================================="
+echo ""
 
-if ! command -v expect >/dev/null 2>&1; then
-  echo "Installing 'expect'..."
-  sudo apt-get update -y && sudo apt-get install -y expect
-fi
+# Ask for Cloudflare Token first
+read -p "Enter Cloudflare TOKEN: " CF_TOKEN
+echo "Starting initial phase..."
 
-read -rp "Cloudflare Tunnel Token: " CF_TOKEN
-echo
-echo "Starting installer. It will pause partway through and ask you to"
-echo "log into the panel (Admin / 12345678 — change this password!), create"
-echo "a node with Daemon Port 8443, and paste back its UUID/Token ID/Token/URL."
-echo
+# Define the sequence up until the panel setup
+(
+    echo "3"; sleep 1
+    echo "1"; sleep 2
+    echo ""; sleep 1 
+    echo ""; sleep 1 
+    echo ""; sleep 1 
+    echo ""; sleep 1 
+    echo ""; sleep 2 
+    echo "0"; sleep 1
+    echo "1"; sleep 1
+    echo ""; sleep 1
+    echo "2"; sleep 1
+    echo "1"; sleep 1
+    echo ""; sleep 2
+    echo "3"; sleep 1
+    echo "$CF_TOKEN"; sleep 2
+    echo "0"; sleep 1
+    echo "6"; sleep 1
+    echo "1"; sleep 1
+    echo "y"; sleep 1
+    echo "y"; sleep 1
+    echo ""; sleep 5 
+    echo "2"; sleep 1
+    echo "1"; sleep 1
+    echo "0"; sleep 1
+    echo "0"; sleep 1
+    echo "4"; sleep 1
+    echo "1"; sleep 1
+    echo ""; sleep 2
+    echo "2"; sleep 1
+) | bash <(curl -s https://githubusercontent.com)
 
-CF_TOKEN="$CF_TOKEN" expect -f - <<'EXPECT_EOF'
-set timeout -1
-set cf_token $env(CF_TOKEN)
+# Pause to let user configure the Panel
+echo ""
+echo "=================================================================="
+echo "⚠️  PAUSED: ACTION REQUIRED IN YOUR BROWSER"
+echo "=================================================================="
+echo "1. Log into your Panel with these credentials:"
+echo "   - Username: Admin"
+echo "   - Password: 12345678"
+echo "2. Create a node."
+echo "   (Note: Daemon Port is 8443, change this in Cloudflare too)"
+echo "3. Copy the Node configuration details."
+echo "=================================================================="
+echo ""
 
-proc send_line {val} { send -- "$val\r" }
+# Grab credentials from keyboard input
+read -p "Enter Node UUID: " NODE_UUID < /dev/tty
+read -p "Enter Node Token ID: " NODE_TOKEN_ID < /dev/tty
+read -p "Enter Node Token: " NODE_TOKEN < /dev/tty
+read -p "Enter Panel URL: " PANEL_URL < /dev/tty
 
-spawn bash -c {bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas)}
+echo ""
+echo "Resuming automation to start Wings... Do not press Ctrl+C."
+echo "=========================================="
 
-# --- Initial setup menu ---
-sleep 1; send_line "3"
-sleep 1; send_line "1"
-sleep 1; send_line ""
-sleep 1; send_line ""
-sleep 1; send_line ""
-sleep 1; send_line ""
-# "left" confirmation
-sleep 2; send_line ""
-
-sleep 1; send_line "0"
-sleep 1; send_line "1"
-sleep 1; send_line ""
-sleep 1; send_line "2"
-sleep 1; send_line "1"
-sleep 1; send_line ""
-
-# --- Cloudflare token prompt ---
-sleep 1; send_line "3"
-expect -re {(?i)TOKEN.*:}
-send_line $cf_token
-sleep 1; send_line ""
-
-sleep 1; send_line "0"
-sleep 1; send_line "6"
-sleep 1; send_line "1"
-sleep 1; send_line "y"
-sleep 1; send_line "y"
-sleep 1; send_line ""
-sleep 1; send_line "2"
-sleep 1; send_line "1"
-sleep 1; send_line "0"
-sleep 1; send_line "0"
-sleep 1; send_line "4"
-sleep 1; send_line "1"
-sleep 1; send_line ""
-sleep 1; send_line "2"
-
-# --- Manual step: you must use the panel's web UI here ---
-send_user "\n\n=== ACTION NEEDED ===\n"
-send_user "Open the Panel URL printed above in your browser.\n"
-send_user "Log in with Admin / 12345678, CHANGE THAT PASSWORD immediately.\n"
-send_user "Create a node (Daemon Port 8443 — match this in Cloudflare too).\n"
-send_user "Then copy its UUID, Token ID, Token, and remote/Panel link.\n\n"
-
-expect -re {(?i)UUID.*:}
-send_user "Paste UUID: "
-expect_user -re {(.*)\n}
-send_line $expect_out(1,string)
-
-expect -re {(?i)Token ID.*:}
-send_user "Paste Token ID: "
-expect_user -re {(.*)\n}
-send_line $expect_out(1,string)
-
-expect -re {(?i)Token.*:}
-send_user "Paste Token: "
-expect_user -re {(.*)\n}
-send_line $expect_out(1,string)
-
-expect -re {(?i)Panel URL.*:}
-send_user "Paste Panel URL: "
-expect_user -re {(.*)\n}
-send_line $expect_out(1,string)
-sleep 1; send_line ""
-
-sleep 1; send_line "3"
-sleep 1; send_line "1"
-
-# Wings is starting now — hand the terminal back to you.
-# Do NOT press Ctrl+C from here on.
-interact
-EXPECT_EOF
+# Final execution sequence using the newly gathered variables
+(
+    echo "$NODE_UUID"; sleep 1
+    echo "$NODE_TOKEN_ID"; sleep 1
+    echo "$NODE_TOKEN"; sleep 1
+    echo "$PANEL_URL"; sleep 2
+    echo "3"; sleep 1
+    echo "1"; sleep 1
+) | bash <(curl -s https://githubusercontent.com)
