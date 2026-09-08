@@ -828,12 +828,26 @@ run_wings_background() {
         pause
         return
     fi
+
+    echo -e "${BYELLOW}${BOLD}!!! WARNING !!!${NC}"
+    echo -e "${BYELLOW}Running Wings in the background (systemd) is known to drop offline${NC}"
+    echo -e "${BYELLOW}after roughly 10 hours on some setups (tunnel/network re-auth issue).${NC}"
+    echo -e "${BYELLOW}If you need a connection that stays reliably up, use 'Run in terminal${NC}"
+    echo -e "${BYELLOW}(foreground)' instead and keep that terminal/tunnel open.${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Continue with background mode anyway? (y/n): "${NC})" bg_confirm
+    if [[ ! "$bg_confirm" =~ ^[Yy]$ ]]; then
+        pause
+        return
+    fi
+
     echo -e "${BCYAN}>>> Starting Wings in background via systemd...${NC}"
     systemctl enable --now wings
     systemctl status wings --no-pager
     echo ""
     echo -e "${BGREEN}>>> Wings is running in the background. Check logs anytime with:${NC}"
     echo -e "    ${YELLOW}journalctl -u wings -f${NC}"
+    echo -e "${BYELLOW}>>> Reminder: if it goes offline after ~10hrs, switch to foreground mode.${NC}"
     pause
 }
 
@@ -842,8 +856,8 @@ run_wings_menu() {
         banner
         echo -e "${BRED}${BOLD}▸ Run Wings${NC}"
     echo -e "${BCYAN}───────────${NC}"
-        echo -e "  ❯ ${BCYAN}1${NC} Run in terminal (foreground)"
-        echo -e "  ❯ ${BCYAN}2${NC} Run in background (systemd)"
+        echo -e "  ❯ ${BCYAN}1${NC} Run in terminal (foreground) ${GREEN}[recommended - no disconnect]${NC}"
+        echo -e "  ❯ ${BCYAN}2${NC} Run in background (systemd) ${YELLOW}[may drop offline after ~10hrs]${NC}"
         echo -e "  ❯ ${BRED}0${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" run_choice
@@ -864,6 +878,10 @@ wings_service_start() {
         pause
         return
     fi
+    echo -e "${BYELLOW}Note: background mode has been seen to drop offline after ~10hrs on some${NC}"
+    echo -e "${BYELLOW}setups. If you need a connection that stays up reliably, use 'Run Wings ->${NC}"
+    echo -e "${BYELLOW}Run in terminal (foreground)' instead.${NC}"
+    echo ""
     echo -e "${BCYAN}>>> Starting Wings background service...${NC}"
     systemctl enable --now wings
     systemctl status wings --no-pager
