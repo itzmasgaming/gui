@@ -1324,6 +1324,30 @@ EXTENSIONS=(
     votifiertester
 )
 
+# Curated bundle - the best extensions for running an actual hosting
+# business (backups, moderation/security, resource control, support,
+# admin quality-of-life). Deliberately skips pure cosmetics (snowflakes,
+# custom favicons/footers, server backgrounds, sidebar theming, etc.) -
+# add/remove names here to tweak your own preset.
+TEMPLATE_EXTENSIONS=(
+    autobackups
+    mysqlautobackup
+    sagaautosuspension
+    resourcemanager
+    resourcealerts
+    pterodactylpanelban
+    trashbin
+    adminauditlogs
+    sociallogin
+    tawkto
+    subdomainmanager
+    eggchanger
+    configeditor
+    monacoeditor
+    startupchanger
+    huxregister
+)
+
 install_extension() {
     local name="$1"
     echo ""
@@ -1379,11 +1403,40 @@ uninstall_all_extensions() {
     pause
 }
 
+install_template_extensions() {
+    echo ""
+    echo -e "${BCYAN}${BOLD}Template - best extensions for hosting:${NC}"
+    for name in "${TEMPLATE_EXTENSIONS[@]}"; do
+        echo -e "  ${BCYAN}❯${NC} ${name}"
+    done
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Install these ${#TEMPLATE_EXTENSIONS[@]} extensions? (y/n): "${NC})" confirm_ans
+    if [[ ! "$confirm_ans" =~ ^[Yy]$ ]]; then
+        return
+    fi
+    for name in "${TEMPLATE_EXTENSIONS[@]}"; do
+        install_extension "$name"
+    done
+    echo -e "${BGREEN}>>> Template installed.${NC}"
+    pause
+}
+
+uninstall_template_extensions() {
+    confirm_destructive "the Template bundle (${#TEMPLATE_EXTENSIONS[@]} extensions)" || return
+    for name in "${TEMPLATE_EXTENSIONS[@]}"; do
+        uninstall_extension "$name"
+    done
+    echo -e "${BGREEN}>>> Template removed.${NC}"
+    pause
+}
+
 # Single unified Extensions Library menu.
 # Type a number      -> install that extension
 # Type r<number>      -> remove that extension
 # Type all            -> install every extension
 # Type r all          -> remove every extension
+# Type template       -> install the curated hosting bundle
+# Type r template     -> remove the curated hosting bundle
 extensions_library_menu() {
     local page_size=15
     local page=0
@@ -1409,6 +1462,7 @@ extensions_library_menu() {
         echo -e "  Page $((page+1))/${total_pages}   ${YELLOW}n${NC})Next   ${YELLOW}p${NC})Prev   ${BRED}0${NC})Back"
         echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
         echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
+        echo -e "  ${WHITE}Install best-for-hosting bundle:${NC} ${BCYAN}template${NC}   ${WHITE}Remove it:${NC} ${BRED}r template${NC}"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" raw_choice
 
@@ -1425,6 +1479,10 @@ extensions_library_menu() {
             install_all_extensions
         elif [[ "$choice" == "rall" ]]; then
             uninstall_all_extensions
+        elif [[ "$choice" == "template" ]]; then
+            install_template_extensions
+        elif [[ "$choice" == "rtemplate" ]]; then
+            uninstall_template_extensions
         elif [[ "$choice" =~ ^r([0-9]+)$ ]]; then
             local num="${BASH_REMATCH[1]}"
             if (( num >= 1 && num <= total )); then
@@ -1694,6 +1752,19 @@ uninstall_menu() {
 }
 
 # ============================================================
+# CREDITS
+# ============================================================
+show_credits() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Credits${NC}"
+    echo -e "${BCYAN}─────────${NC}"
+    echo ""
+    echo -e "${WHITE}Docker and Wings fixers given by:${NC} ${YELLOW}Xorvila Team Dev${NC}"
+    echo -e "${WHITE}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ${YELLOW}ItzMASGaming${NC}"
+    pause
+}
+
+# ============================================================
 # MAIN MENU
 # ============================================================
 show_menu() {
@@ -1705,7 +1776,8 @@ show_menu() {
     echo -e "  ❯ ${BCYAN}5${NC} System Spec"
     echo -e "  ❯ ${BCYAN}6${NC} Blueprint + Themes (Fixed)"
     echo -e "  ❯ ${BCYAN}7${NC} Installed Apps"
-    echo -e "  ❯ ${BCYAN}8${NC} Uninstall"
+    echo -e "  ❯ ${BCYAN}8${NC} Credits"
+    echo -e "  ❯ ${BCYAN}9${NC} Uninstall"
     echo -e "  ❯ ${BRED}0${NC} Exit"
     echo ""
     read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" choice
@@ -1718,7 +1790,8 @@ show_menu() {
         5) run_system_spec ;;
         6) blueprint_menu ;;
         7) run_installed_apps ;;
-        8) uninstall_menu ;;
+        8) show_credits ;;
+        9) uninstall_menu ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
