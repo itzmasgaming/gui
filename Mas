@@ -1218,29 +1218,6 @@ run_theme_euphoria() {
     sleep 2
 }
 
-run_theme_add_tool() {
-    echo ""
-    echo -e "${BCYAN}>>> Add Tool auto-install starting...${NC}"
-    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
-
-    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/versionchanger.blueprint
-    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/mcplugins.blueprint
-    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/minecraftplayermanager.blueprint
-    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/huxregister.blueprint
-    clear_blueprint_lock
-    blueprint -i versionchanger
-    clear_blueprint_lock
-    blueprint -i mcplugins
-    clear_blueprint_lock
-    blueprint -i minecraftplayermanager
-    clear_blueprint_lock
-    blueprint -i huxregister
-    rm -f versionchanger.blueprint mcplugins.blueprint minecraftplayermanager.blueprint huxregister.blueprint
-
-    echo -e "${BGREEN}>>> Add Tool package installed!${NC}"
-    sleep 2
-}
-
 theme_uninstall_menu() {
     while true; do
         banner
@@ -1248,7 +1225,6 @@ theme_uninstall_menu() {
     echo -e "${BCYAN}────────────────${NC}"
         echo -e "  ❯ ${BCYAN}1${NC} Remove Nebula"
         echo -e "  ❯ ${BCYAN}2${NC} Remove Euphoria"
-        echo -e "  ❯ ${BCYAN}3${NC} Remove Add Tool Package"
         echo -e "  ❯ ${BRED}0${NC} Back"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" uopt
@@ -1266,16 +1242,6 @@ theme_uninstall_menu() {
                 cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
                 blueprint -r euphoriatheme
                 echo -e "${BGREEN}>>> Euphoria removed!${NC}"
-                sleep 2
-                ;;
-            3)
-                echo -e "${BCYAN}>>> Removing Add Tool package...${NC}"
-                cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
-                blueprint -r versionchanger
-                blueprint -r mcplugins
-                blueprint -r minecraftplayermanager
-                blueprint -r huxregister
-                echo -e "${BGREEN}>>> Add Tool package removed!${NC}"
                 sleep 2
                 ;;
             0) return ;;
@@ -1390,10 +1356,35 @@ uninstall_extension() {
     sleep 2
 }
 
-# Paginated browse/select over the full EXTENSIONS array.
-# $1 = mode: "install" or "uninstall"
-extensions_browse_menu() {
-    local mode="$1"
+install_all_extensions() {
+    echo ""
+    echo -e "${BYELLOW}This will install all ${#EXTENSIONS[@]} extensions one by one. This may take a while.${NC}"
+    read -rp "$(echo -e ${YELLOW}"Continue? (y/n): "${NC})" confirm_ans
+    if [[ ! "$confirm_ans" =~ ^[Yy]$ ]]; then
+        return
+    fi
+    for name in "${EXTENSIONS[@]}"; do
+        install_extension "$name"
+    done
+    echo -e "${BGREEN}>>> All extensions installed.${NC}"
+    pause
+}
+
+uninstall_all_extensions() {
+    confirm_destructive "ALL ${#EXTENSIONS[@]} extensions in the library" || return
+    for name in "${EXTENSIONS[@]}"; do
+        uninstall_extension "$name"
+    done
+    echo -e "${BGREEN}>>> All extensions removed.${NC}"
+    pause
+}
+
+# Single unified Extensions Library menu.
+# Type a number      -> install that extension
+# Type r<number>      -> remove that extension
+# Type all            -> install every extension
+# Type r all          -> remove every extension
+extensions_library_menu() {
     local page_size=15
     local page=0
     local total=${#EXTENSIONS[@]}
@@ -1401,12 +1392,8 @@ extensions_browse_menu() {
 
     while true; do
         banner
-        if [ "$mode" = "uninstall" ]; then
-            echo -e "${BCYAN}${BOLD}▸ Extensions Library - Remove${NC}"
-        else
-            echo -e "${BCYAN}${BOLD}▸ Extensions Library - Install${NC}"
-        fi
-        echo -e "${BCYAN}────────────────────────────────${NC}"
+        echo -e "${BCYAN}${BOLD}▸ Extensions Library${NC}"
+        echo -e "${BCYAN}─────────────────────${NC}"
         echo -e "${YELLOW}${total} extensions available${NC}"
         echo ""
 
@@ -1419,59 +1406,41 @@ extensions_browse_menu() {
         done
 
         echo ""
-        echo -e "  Page $((page+1))/${total_pages}"
-        echo -e "  ${YELLOW}n${NC}) Next page   ${YELLOW}p${NC}) Prev page   ${BRED}0${NC}) Back"
+        echo -e "  Page $((page+1))/${total_pages}   ${YELLOW}n${NC})Next   ${YELLOW}p${NC})Prev   ${BRED}0${NC})Back"
+        echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
+        echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
         echo ""
-        read -rp "$(echo -e ${BCYAN}${BOLD}"Select a number, or n/p/0: "${NC})" ext_choice
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" raw_choice
 
-        case "$ext_choice" in
-            n|N)
-                (( page < total_pages - 1 )) && page=$((page+1))
-                ;;
-            p|P)
-                (( page > 0 )) && page=$((page-1))
-                ;;
-            0)
-                return
-                ;;
-            ''|*[!0-9]*)
-                echo -e "${BRED}Invalid option.${NC}"
-                sleep 1
-                ;;
-            *)
-                if (( ext_choice >= 1 && ext_choice <= total )); then
-                    local ext_name="${EXTENSIONS[$((ext_choice-1))]}"
-                    if [ "$mode" = "uninstall" ]; then
-                        uninstall_extension "$ext_name"
-                    else
-                        install_extension "$ext_name"
-                    fi
-                else
-                    echo -e "${BRED}Invalid option.${NC}"
-                    sleep 1
-                fi
-                ;;
-        esac
-    done
-}
+        local choice
+        choice=$(echo "$raw_choice" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
 
-extensions_library_menu() {
-    while true; do
-        banner
-        echo -e "${BCYAN}${BOLD}▸ Extensions Library${NC}"
-        echo -e "${BCYAN}────────────────────${NC}"
-        echo -e "  ❯ ${BCYAN}1${NC} Install an extension"
-        echo -e "  ❯ ${BCYAN}2${NC} Remove an extension"
-        echo -e "  ❯ ${BRED}0${NC} Back"
-        echo ""
-        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" lib_choice
-
-        case "$lib_choice" in
-            1) extensions_browse_menu "install" ;;
-            2) extensions_browse_menu "uninstall" ;;
-            0) return ;;
-            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
-        esac
+        if [[ "$choice" == "n" ]]; then
+            (( page < total_pages - 1 )) && page=$((page+1))
+        elif [[ "$choice" == "p" ]]; then
+            (( page > 0 )) && page=$((page-1))
+        elif [[ "$choice" == "0" ]]; then
+            return
+        elif [[ "$choice" == "all" ]]; then
+            install_all_extensions
+        elif [[ "$choice" == "rall" ]]; then
+            uninstall_all_extensions
+        elif [[ "$choice" =~ ^r([0-9]+)$ ]]; then
+            local num="${BASH_REMATCH[1]}"
+            if (( num >= 1 && num <= total )); then
+                uninstall_extension "${EXTENSIONS[$((num-1))]}"
+            else
+                echo -e "${BRED}Invalid number.${NC}"; sleep 1
+            fi
+        elif [[ "$choice" =~ ^[0-9]+$ ]]; then
+            if (( choice >= 1 && choice <= total )); then
+                install_extension "${EXTENSIONS[$((choice-1))]}"
+            else
+                echo -e "${BRED}Invalid number.${NC}"; sleep 1
+            fi
+        else
+            echo -e "${BRED}Invalid option.${NC}"; sleep 1
+        fi
     done
 }
 
@@ -1483,8 +1452,7 @@ theme_installer_menu() {
         echo -e "  ❯ ${BCYAN}1${NC} Nebula (Auto Install)"
         echo -e "  ❯ ${BCYAN}2${NC} Euphoria (Auto Install)"
         echo -e "  ❯ ${BCYAN}3${NC} Uninstall"
-        echo -e "  ❯ ${BCYAN}4${NC} Add Tool (Auto Install - versionchanger/mcplugins/minecraftplayermanager/huxregister bundle)"
-        echo -e "  ❯ ${BCYAN}5${NC} Extensions Library (all ${#EXTENSIONS[@]} extensions)"
+        echo -e "  ❯ ${BCYAN}4${NC} Extensions Library (all ${#EXTENSIONS[@]} extensions)"
         echo -e "  ❯ ${BRED}0${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" theme_choice
@@ -1493,8 +1461,7 @@ theme_installer_menu() {
             1) run_theme_nebula ;;
             2) run_theme_euphoria ;;
             3) theme_uninstall_menu ;;
-            4) run_theme_add_tool ;;
-            5) extensions_library_menu ;;
+            4) extensions_library_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -1727,20 +1694,6 @@ uninstall_menu() {
 }
 
 # ============================================================
-# CREDITS
-# ============================================================
-show_credits() {
-    banner
-    echo -e "${BCYAN}${BOLD}▸ Credits${NC}"
-    echo -e "${BCYAN}─────────${NC}"
-    echo ""
-    echo -e "${WHITE}Docker and Wings fixers given by:${NC} ${YELLOW}Xorvila Team Dev${NC}"
-    echo -e "${WHITE}Hole Gui + pterodactyl + wings and wings config automate by:${NC} ${YELLOW}ItzMASGaming${NC}"
-    echo -e "${WHITE}Blueprint themes provided by:${NC} ${YELLOW}Jishnu/The-Coding-Hub${NC}"
-    pause
-}
-
-# ============================================================
 # MAIN MENU
 # ============================================================
 show_menu() {
@@ -1752,8 +1705,7 @@ show_menu() {
     echo -e "  ❯ ${BCYAN}5${NC} System Spec"
     echo -e "  ❯ ${BCYAN}6${NC} Blueprint + Themes (Fixed)"
     echo -e "  ❯ ${BCYAN}7${NC} Installed Apps"
-    echo -e "  ❯ ${BCYAN}8${NC} Credits"
-    echo -e "  ❯ ${BCYAN}9${NC} Uninstall"
+    echo -e "  ❯ ${BCYAN}8${NC} Uninstall"
     echo -e "  ❯ ${BRED}0${NC} Exit"
     echo ""
     read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" choice
@@ -1766,8 +1718,7 @@ show_menu() {
         5) run_system_spec ;;
         6) blueprint_menu ;;
         7) run_installed_apps ;;
-        8) show_credits ;;
-        9) uninstall_menu ;;
+        8) uninstall_menu ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
