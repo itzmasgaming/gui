@@ -1223,19 +1223,19 @@ run_theme_add_tool() {
     echo -e "${BCYAN}>>> Add Tool auto-install starting...${NC}"
     cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
 
-    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/versionchanger.blueprint
-    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/mcplugins.blueprint
-    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/sagaminecraftplayermanager.blueprint
-    wget -q https://github.com/nobita329/The-Coding-Hub/raw/refs/heads/main/srv/thame/huxregister.blueprint
+    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/versionchanger.blueprint
+    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/mcplugins.blueprint
+    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/minecraftplayermanager.blueprint
+    wget -q https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension/huxregister.blueprint
     clear_blueprint_lock
     blueprint -i versionchanger
     clear_blueprint_lock
     blueprint -i mcplugins
     clear_blueprint_lock
-    blueprint -i sagaminecraftplayermanager
+    blueprint -i minecraftplayermanager
     clear_blueprint_lock
-    blueprint -i huxregister.blueprint
-    rm -f versionchanger.blueprint mcplugins.blueprint sagaminecraftplayermanager.blueprint huxregister.blueprint
+    blueprint -i huxregister
+    rm -f versionchanger.blueprint mcplugins.blueprint minecraftplayermanager.blueprint huxregister.blueprint
 
     echo -e "${BGREEN}>>> Add Tool package installed!${NC}"
     sleep 2
@@ -1273,10 +1273,202 @@ theme_uninstall_menu() {
                 cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; continue; }
                 blueprint -r versionchanger
                 blueprint -r mcplugins
-                blueprint -r sagaminecraftplayermanager
+                blueprint -r minecraftplayermanager
+                blueprint -r huxregister
                 echo -e "${BGREEN}>>> Add Tool package removed!${NC}"
                 sleep 2
                 ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+# EXTENSIONS LIBRARY - full thame/Extension catalog (Nobita-Cloud)
+# ============================================================
+EXTENSION_REPO_BASE="https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension"
+
+EXTENSIONS=(
+    activitypurges
+    adminauditlogs
+    autobackups
+    blueannoucements
+    configeditor
+    consolelogs
+    customcss
+    customserversort
+    databaseimportexport
+    eggchanger
+    huxregister
+    laravellogs
+    loader
+    lyrdyannounce
+    mclogs
+    mcp
+    mcplayer
+    mcplugins
+    mctools
+    minecraftmodmanager
+    minecraftplayermanager
+    minecraftpluginmanager
+    modrinthbrowser
+    monacoeditor
+    motdmaker
+    mysqlautobackup
+    node
+    nopagination
+    paneladdressoverride
+    playerlisting
+    pstatistics
+    pterodactylcpuburst
+    pterodactylpanelban
+    pterodactylramburst
+    pteromonaco
+    pullfiles
+    redirect
+    resourcealerts
+    resourcemanager
+    sagaautosuspension
+    sagaminecraftmodpackinstaller
+    serverbackgrounds
+    servericonimporter
+    serverid
+    serverimporter
+    serverpropsmanager
+    serversplitter
+    shownodeids
+    sidebar
+    simplefavicons
+    simplefooters
+    snowflakes
+    sociallogin
+    startupchanger
+    stats
+    stellar
+    subdomainmanager
+    subdomains
+    tawkto
+    translations
+    trashbin
+    urldownloader
+    vanillatweaks
+    versionchanger
+    vminfo
+    votifiertester
+)
+
+install_extension() {
+    local name="$1"
+    echo ""
+    echo -e "${BCYAN}>>> Installing extension: ${name}...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    if ! wget -q "${EXTENSION_REPO_BASE}/${name}.blueprint"; then
+        echo -e "${BRED}Download failed for ${name}.blueprint - check your network/the source repo.${NC}"
+        sleep 2
+        return
+    fi
+
+    clear_blueprint_lock
+    blueprint -i "$name"
+    rm -f "${name}.blueprint"
+
+    echo -e "${BGREEN}>>> ${name} installed!${NC}"
+    sleep 2
+}
+
+uninstall_extension() {
+    local name="$1"
+    echo ""
+    echo -e "${BCYAN}>>> Removing extension: ${name}...${NC}"
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
+
+    blueprint -r "$name"
+
+    echo -e "${BGREEN}>>> ${name} removed!${NC}"
+    sleep 2
+}
+
+# Paginated browse/select over the full EXTENSIONS array.
+# $1 = mode: "install" or "uninstall"
+extensions_browse_menu() {
+    local mode="$1"
+    local page_size=15
+    local page=0
+    local total=${#EXTENSIONS[@]}
+    local total_pages=$(( (total + page_size - 1) / page_size ))
+
+    while true; do
+        banner
+        if [ "$mode" = "uninstall" ]; then
+            echo -e "${BCYAN}${BOLD}▸ Extensions Library - Remove${NC}"
+        else
+            echo -e "${BCYAN}${BOLD}▸ Extensions Library - Install${NC}"
+        fi
+        echo -e "${BCYAN}────────────────────────────────${NC}"
+        echo -e "${YELLOW}${total} extensions available${NC}"
+        echo ""
+
+        local start=$(( page * page_size ))
+        local end=$(( start + page_size - 1 ))
+        (( end >= total )) && end=$(( total - 1 ))
+
+        for (( i=start; i<=end; i++ )); do
+            printf "  ${BCYAN}❯ %-3d${NC} %s\n" "$((i+1))" "${EXTENSIONS[$i]}"
+        done
+
+        echo ""
+        echo -e "  Page $((page+1))/${total_pages}"
+        echo -e "  ${YELLOW}n${NC}) Next page   ${YELLOW}p${NC}) Prev page   ${BRED}0${NC}) Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select a number, or n/p/0: "${NC})" ext_choice
+
+        case "$ext_choice" in
+            n|N)
+                (( page < total_pages - 1 )) && page=$((page+1))
+                ;;
+            p|P)
+                (( page > 0 )) && page=$((page-1))
+                ;;
+            0)
+                return
+                ;;
+            ''|*[!0-9]*)
+                echo -e "${BRED}Invalid option.${NC}"
+                sleep 1
+                ;;
+            *)
+                if (( ext_choice >= 1 && ext_choice <= total )); then
+                    local ext_name="${EXTENSIONS[$((ext_choice-1))]}"
+                    if [ "$mode" = "uninstall" ]; then
+                        uninstall_extension "$ext_name"
+                    else
+                        install_extension "$ext_name"
+                    fi
+                else
+                    echo -e "${BRED}Invalid option.${NC}"
+                    sleep 1
+                fi
+                ;;
+        esac
+    done
+}
+
+extensions_library_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}▸ Extensions Library${NC}"
+        echo -e "${BCYAN}────────────────────${NC}"
+        echo -e "  ❯ ${BCYAN}1${NC} Install an extension"
+        echo -e "  ❯ ${BCYAN}2${NC} Remove an extension"
+        echo -e "  ❯ ${BRED}0${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" lib_choice
+
+        case "$lib_choice" in
+            1) extensions_browse_menu "install" ;;
+            2) extensions_browse_menu "uninstall" ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
@@ -1291,7 +1483,8 @@ theme_installer_menu() {
         echo -e "  ❯ ${BCYAN}1${NC} Nebula (Auto Install)"
         echo -e "  ❯ ${BCYAN}2${NC} Euphoria (Auto Install)"
         echo -e "  ❯ ${BCYAN}3${NC} Uninstall"
-        echo -e "  ❯ ${BCYAN}4${NC} Add Tool (Auto Install)"
+        echo -e "  ❯ ${BCYAN}4${NC} Add Tool (Auto Install - versionchanger/mcplugins/minecraftplayermanager/huxregister bundle)"
+        echo -e "  ❯ ${BCYAN}5${NC} Extensions Library (all ${#EXTENSIONS[@]} extensions)"
         echo -e "  ❯ ${BRED}0${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" theme_choice
@@ -1301,6 +1494,7 @@ theme_installer_menu() {
             2) run_theme_euphoria ;;
             3) theme_uninstall_menu ;;
             4) run_theme_add_tool ;;
+            5) extensions_library_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
