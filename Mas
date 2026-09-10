@@ -1218,6 +1218,48 @@ run_theme_euphoria() {
     sleep 2
 }
 
+run_theme_aric() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Aric Theme${NC}"
+    echo -e "${BCYAN}────────────${NC}"
+    echo ""
+    echo -e "${BRED}${BOLD}!!! WARNING !!!${NC}"
+    echo -e "${BYELLOW}Aric Theme requires a LICENSE key + the email it's registered to.${NC}"
+    echo -e "${BYELLOW}If you don't have a LICENSE/email, get a key from:${NC} ${BCYAN}https://discord.gg/nTTnpdXRMP${NC}"
+    echo ""
+
+    read -rp "$(echo -e ${YELLOW}"Email: "${NC})" aric_email
+    read -rp "$(echo -e ${YELLOW}"LICENSE: "${NC})" aric_license
+
+    if [ -z "$aric_email" ] || [ -z "$aric_license" ]; then
+        echo -e "${BRED}Both Email and LICENSE are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "${BCYAN}>>> Aric Theme auto-install starting...${NC}"
+
+    apt-get update && apt-get install -y locales && locale-gen en_US.UTF-8 && update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+
+    bash <(curl -sL https://arix.skacloud.qzz.io/) <<EOF
+1
+1
+2
+1
+"$aric_email"
+"$aric_license"
+EOF
+
+    echo ""
+    echo -e "${BGREEN}>>> Aric Theme install finished.${NC}"
+    echo -e "${BYELLOW}>>> If the installer left a sub-process running/attached, Ctrl+C out of it${NC}"
+    echo -e "${BYELLOW}>>> then relaunch MAS Gui normally.${NC}"
+    pause
+}
+
 theme_uninstall_menu() {
     while true; do
         banner
@@ -1509,8 +1551,9 @@ theme_installer_menu() {
     echo -e "${BCYAN}───────────────────────────────${NC}"
         echo -e "  ❯ ${BCYAN}1${NC} Nebula (Auto Install)"
         echo -e "  ❯ ${BCYAN}2${NC} Euphoria (Auto Install)"
-        echo -e "  ❯ ${BCYAN}3${NC} Uninstall"
-        echo -e "  ❯ ${BCYAN}4${NC} Extensions Library (all ${#EXTENSIONS[@]} extensions)"
+        echo -e "  ❯ ${BCYAN}3${NC} Aric Theme (Auto Install - requires LICENSE)"
+        echo -e "  ❯ ${BCYAN}4${NC} Uninstall"
+        echo -e "  ❯ ${BCYAN}5${NC} Extensions Library (all ${#EXTENSIONS[@]} extensions)"
         echo -e "  ❯ ${BRED}0${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" theme_choice
@@ -1518,8 +1561,9 @@ theme_installer_menu() {
         case "$theme_choice" in
             1) run_theme_nebula ;;
             2) run_theme_euphoria ;;
-            3) theme_uninstall_menu ;;
-            4) extensions_library_menu ;;
+            3) run_theme_aric ;;
+            4) theme_uninstall_menu ;;
+            5) extensions_library_menu ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
