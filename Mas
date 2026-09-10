@@ -1390,6 +1390,13 @@ TEMPLATE_EXTENSIONS=(
     huxregister
 )
 
+# Blueprint Framework installs each extension into its own folder under
+# .blueprint/extensions/<name>/ - use that to detect install status.
+is_extension_installed() {
+    local name="$1"
+    [ -d "$PTERODACTYL_DIR/.blueprint/extensions/$name" ]
+}
+
 install_extension() {
     local name="$1"
     echo ""
@@ -1497,10 +1504,19 @@ extensions_library_menu() {
         (( end >= total )) && end=$(( total - 1 ))
 
         for (( i=start; i<=end; i++ )); do
-            printf "  ${BCYAN}❯ %-3d${NC} %s\n" "$((i+1))" "${EXTENSIONS[$i]}"
+            local ext_name="${EXTENSIONS[$i]}"
+            local dot_color dot_char
+            if is_extension_installed "$ext_name"; then
+                dot_color="${BGREEN}"; dot_char="●"
+            else
+                dot_color="${BRED}"; dot_char="○"
+            fi
+            printf "  ${BCYAN}❯ %-3d${NC} " "$((i+1))"
+            echo -e "${dot_color}${dot_char}${NC} ${ext_name}"
         done
 
         echo ""
+        echo -e "  ${BGREEN}●${NC} installed   ${BRED}○${NC} not installed"
         echo -e "  Page $((page+1))/${total_pages}   ${YELLOW}n${NC})Next   ${YELLOW}p${NC})Prev   ${BRED}0${NC})Back"
         echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
         echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
