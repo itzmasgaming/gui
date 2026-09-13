@@ -71,8 +71,8 @@ banner() {
 
     echo -e "${BRED}${BOLD}┏${line}┓${NC}"
     echo -e "${BRED}${BOLD}┃${NC}$(center "" )${BRED}${BOLD}┃${NC}"
-    echo -e "${BRED}${BOLD}┃${NC}${BOLD}${BMAGENTA}$(center "◆ MAS GUI ◆")${NC}${BRED}${BOLD}┃${NC}"
-    echo -e "${BRED}${BOLD}┃${NC}${BBCYAN}$(center "Pterodactyl Panel + Wings Toolkit")${NC}${BRED}${BOLD}┃${NC}"
+    echo -e "${BRED}${BOLD}┃${NC}${BOLD}${BBCYAN}$(center "◆ MAS GUI ◆")${NC}${BRED}${BOLD}┃${NC}"
+    echo -e "${BRED}${BOLD}┃${NC}${BCYAN}$(center "Pterodactyl Panel + Wings Toolkit")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}${YELLOW}$(center "ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}${WHITE}$(center "v2.1")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}$(center "" )${BRED}${BOLD}┃${NC}"
