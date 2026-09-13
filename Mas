@@ -733,21 +733,11 @@ EOF
 # ============================================================
 # WINGS - config setup
 # ============================================================
-run_wings_config() {
-    echo ""
-    echo -e "${BCYAN}>>> Wings Config Setup${NC}"
-    echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
-    echo ""
-    read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
-    read -rp "$(echo -e ${YELLOW}"Token ID: "${NC})" w_token_id
-    read -rp "$(echo -e ${YELLOW}"Token: "${NC})" w_token
-    read -rp "$(echo -e ${YELLOW}"Panel URL (remote link, e.g. https://cold-rabbit-94.telebit.io): "${NC})" w_remote
-
-    if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ] || [ -z "$w_remote" ]; then
-        echo -e "${BRED}All four fields are required. Aborting.${NC}"
-        pause
-        return
-    fi
+write_wings_config() {
+    local w_uuid="$1"
+    local w_token_id="$2"
+    local w_token="$3"
+    local w_remote="$4"
 
     mkdir -p /etc/pterodactyl
 
@@ -806,9 +796,138 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
     systemctl daemon-reload
+}
+
+run_wings_config() {
+    echo ""
+    echo -e "${BCYAN}>>> Wings Config Setup${NC}"
+    echo "Get these values from your Panel: Admin -> Nodes -> your node -> Configuration tab"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"UUID: "${NC})" w_uuid
+    read -rp "$(echo -e ${YELLOW}"Token ID: "${NC})" w_token_id
+    read -rp "$(echo -e ${YELLOW}"Token: "${NC})" w_token
+    read -rp "$(echo -e ${YELLOW}"Panel URL (remote link, e.g. https://cold-rabbit-94.telebit.io): "${NC})" w_remote
+
+    if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ] || [ -z "$w_remote" ]; then
+        echo -e "${BRED}All four fields are required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    write_wings_config "$w_uuid" "$w_token_id" "$w_token" "$w_remote"
 
     echo ""
     echo -e "${BGREEN}>>> wings.service created. Go to Wings Setup -> Run Wings to start it.${NC}"
+    pause
+}
+
+# ============================================================
+# WINGS AUTO (BETA) - auto-create a node on a local Panel and
+# wire Wings up to it with zero manual copy/paste, when Panel
+# and Wings are on the same machine.
+# ============================================================
+run_wings_auto() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Wings Auto (BETA)${NC}"
+    echo -e "${BCYAN}────────────────────${NC}"
+    echo ""
+    echo -e "${BYELLOW}${BOLD}BETA:${NC} ${BYELLOW}this auto-creates a Node on the Panel found on this same${NC}"
+    echo -e "${BYELLOW}machine (via an internal Panel service call) and wires Wings straight to${NC}"
+    echo -e "${BYELLOW}it - no manual node creation / UUID-token copy-paste needed. If anything${NC}"
+    echo -e "${BYELLOW}here fails, fall back to 'Wings config setup' (manual) instead.${NC}"
+    echo ""
+
+    if [ ! -f "$PTERODACTYL_DIR/artisan" ]; then
+        echo -e "${BRED}No Pterodactyl Panel found at ${PTERODACTYL_DIR} on this machine.${NC}"
+        echo -e "${BRED}Wings Auto only works when Panel + Wings are on the same node/VPS/PC.${NC}"
+        pause
+        return
+    fi
+
+    local detected_url=""
+    if [ -f "$PTERODACTYL_DIR/.env" ]; then
+        detected_url=$(grep -m1 '^APP_URL=' "$PTERODACTYL_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    fi
+
+    echo -e "${BCYAN}Detected Panel URL from .env:${NC} ${YELLOW}${detected_url:-<none found>}${NC}"
+    read -rp "$(echo -e ${YELLOW}"Press ENTER to use this, or type a different Panel URL: "${NC})" url_override
+    local panel_url="${url_override:-$detected_url}"
+
+    if [ -z "$panel_url" ]; then
+        echo -e "${BRED}No Panel URL available (detected or entered). Aborting.${NC}"
+        pause
+        return
+    fi
+
+    if [ ! -f /usr/local/bin/wings ]; then
+        echo ""
+        echo -e "${BCYAN}>>> Wings binary not found - running install + docker + fix first...${NC}"
+        run_wings_install_docker_fix
+    fi
+
+    echo ""
+    echo -e "${BCYAN}>>> Creating a Node on the local Panel via internal service...${NC}"
+
+    cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; pause; return; }
+
+    local node_name="AutoWingsNode-$(date +%s)"
+    local tinker_output
+    tinker_output=$(php artisan tinker --execute="
+\$location = \Pterodactyl\Models\Location::first();
+if (!\$location) {
+    \$location = \Pterodactyl\Models\Location::create(['short' => 'auto', 'long' => 'Auto-created location']);
+}
+\$service = app(\Pterodactyl\Services\Nodes\NodeCreationService::class);
+\$node = \$service->handle([
+    'name' => '$node_name',
+    'location_id' => \$location->id,
+    'fqdn' => '$panel_url',
+    'scheme' => 'https',
+    'memory' => 0,
+    'memory_overallocate' => 0,
+    'disk' => 0,
+    'disk_overallocate' => 0,
+    'upload_size' => 100,
+    'daemonListen' => 8443,
+    'daemonSftp' => 2022,
+    'daemonBase' => '/var/lib/pterodactyl/volumes',
+    'behind_proxy' => false,
+    'maintenance_mode' => false,
+]);
+echo 'AUTONODE_RESULT:'.\$node->uuid.'|'.\$node->daemon_token_id.'|'.\$node->daemon_token.'|'.\$node->fqdn;
+" 2>&1)
+
+    local result_line
+    result_line=$(echo "$tinker_output" | grep "AUTONODE_RESULT:" | tail -n1)
+
+    if [ -z "$result_line" ]; then
+        echo -e "${BRED}Auto node creation failed. Panel output:${NC}"
+        echo "$tinker_output"
+        echo ""
+        echo -e "${BYELLOW}Fall back to 'Wings config setup' and create the node manually via the${NC}"
+        echo -e "${BYELLOW}Panel admin UI (Admin -> Nodes) instead.${NC}"
+        pause
+        return
+    fi
+
+    result_line="${result_line#AUTONODE_RESULT:}"
+    IFS='|' read -r w_uuid w_token_id w_token w_fqdn <<< "$result_line"
+
+    if [ -z "$w_uuid" ] || [ -z "$w_token_id" ] || [ -z "$w_token" ]; then
+        echo -e "${BRED}Node was created but credentials could not be read back. Raw output:${NC}"
+        echo "$tinker_output"
+        pause
+        return
+    fi
+
+    echo -e "${BGREEN}>>> Node created: ${node_name} (UUID: ${w_uuid})${NC}"
+    echo ""
+    echo -e "${BCYAN}>>> Writing Wings config + service...${NC}"
+    write_wings_config "$w_uuid" "$w_token_id" "$w_token" "$panel_url"
+
+    echo ""
+    echo -e "${BGREEN}>>> Wings Auto setup complete.${NC}"
+    echo -e "${BYELLOW}>>> Go to Wings Setup -> Run Wings to start it (foreground recommended).${NC}"
     pause
 }
 
@@ -959,6 +1078,7 @@ wings_setup_menu() {
         echo -e "  ❯ ${BCYAN}2${NC} Wings config setup"
         echo -e "  ❯ ${BCYAN}3${NC} Run Wings"
         echo -e "  ❯ ${BCYAN}4${NC} Wings Background Service"
+        echo -e "  ❯ ${BYELLOW}5${NC} Wings Auto ${BYELLOW}[BETA - auto-detect local Panel]${NC}"
         echo -e "  ❯ ${BRED}0${NC} Exit"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" wings_choice
@@ -968,6 +1088,7 @@ wings_setup_menu() {
             2) run_wings_config ;;
             3) run_wings_menu ;;
             4) wings_background_service_menu ;;
+            5) run_wings_auto ;;
             0) return ;;
             *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
         esac
