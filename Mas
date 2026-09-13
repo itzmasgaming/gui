@@ -7,11 +7,16 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v2.8 - Extensions Library watchdog narrowed: it now only fires when
+#          the LAST output line contains "46" (matching the observed
+#          "stuck at 46%" freeze) and stays unchanged for 16s straight -
+#          not on any generic pause in output. Configurable via
+#          EXT_STUCK_PATTERN / EXT_STUCK_TIMEOUT env vars.
 #   v2.7 - Extensions Library: blueprint -i can hang mid-install (often
 #          reported stuck around the same % in the progress bar). Each
-#          extension install now runs under a watchdog timeout (default
-#          10s of no output) and is auto-killed + skipped so the loop
-#          moves on to the next extension instead of hanging forever.
+#          extension install now runs under a watchdog timeout and is
+#          auto-killed + skipped so the loop moves on to the next
+#          extension instead of hanging forever.
 #   v2.6 - Wings Auto: fixed 403 AccessDeniedHttpException - daemon_token
 #          is stored Laravel-encrypted at rest; we were writing the raw
 #          ciphertext into config.yml instead of the decrypted plaintext
@@ -30,7 +35,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="2.7"
+SCRIPT_VERSION="2.8"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -75,11 +80,14 @@ CFG_AGREE_TOS="y"
 CFG_ASSUME_SSL="y"
 
 # ---- Extensions Library watchdog ----
-# If a `blueprint -i <extension>` run produces no new output for this many
-# seconds, it's treated as "stuck" (this is what shows up as the install
-# freezing at a fixed percentage), and it is killed so the loop can move
-# on to the next extension.
-EXT_STUCK_TIMEOUT="${EXT_STUCK_TIMEOUT:-10}"
+# blueprint -i has been observed to freeze specifically at the "46%"
+# progress line. If the LAST line of output contains this pattern and
+# stays exactly the same (unchanged) for EXT_STUCK_TIMEOUT seconds, it's
+# treated as stuck and the process is killed so the loop can move on to
+# the next extension. Override either via env if needed, e.g.:
+#   EXT_STUCK_PATTERN=46 EXT_STUCK_TIMEOUT=16 bash Mas.sh
+EXT_STUCK_PATTERN="${EXT_STUCK_PATTERN:-46}"
+EXT_STUCK_TIMEOUT="${EXT_STUCK_TIMEOUT:-16}"
 
 PANEL_INSTALLER_URL="https://pterodactyl-installer.se/"
 PTERODACTYL_DIR="/var/www/pterodactyl"
@@ -157,37 +165,51 @@ confirm_destructive() {
     return 0
 }
 
-# Runs a command, but kills it if it produces no new output for
-# EXT_STUCK_TIMEOUT seconds (rather than a flat overall timeout, which
-# would also kill slow-but-progressing installs). Returns the command's
-# exit code, or 124 if it was killed for being stuck.
+# Runs a command, but kills it specifically if the LAST line it printed
+# contains $pattern (e.g. "46", matching a "46%" progress line) AND that
+# exact line hasn't changed for $timeout_secs seconds. Output that never
+# shows the pattern, or that keeps changing, is left alone no matter how
+# long it runs. Returns the command's exit code, or 124 if killed for
+# being stuck.
 run_with_stuck_watchdog() {
-    local timeout_secs="$1"; shift
-    local out_pipe
-    out_pipe=$(mktemp -u)
-    mkfifo "$out_pipe"
+    local pattern="$1" timeout_secs="$2"; shift 2
+    local out_file
+    out_file=$(mktemp)
 
-    # Run the real command, tee its output to the terminal AND to the fifo
-    # (which the watchdog reads from to know "did anything happen recently").
-    ("$@" > >(tee "$out_pipe") 2>&1) &
+    # Run the real command, showing output live and also logging it so the
+    # watchdog can inspect the last line.
+    ("$@" 2>&1 | tee "$out_file") &
     local cmd_pid=$!
 
     (
-        while IFS= read -r -t "$timeout_secs" _line <"$out_pipe"; do :; done
-        # read timed out -> no output for $timeout_secs seconds -> stuck
-        if kill -0 "$cmd_pid" 2>/dev/null; then
-            echo -e "\n${BRED}>>> No progress for ${timeout_secs}s - assuming it's stuck, killing it...${NC}"
-            kill -TERM "$cmd_pid" 2>/dev/null
+        local prev_line="" stuck_secs=0
+        while kill -0 "$cmd_pid" 2>/dev/null; do
             sleep 1
-            kill -KILL "$cmd_pid" 2>/dev/null
-        fi
+            local cur_line
+            cur_line=$(tail -n1 "$out_file" 2>/dev/null)
+
+            if [[ "$cur_line" == *"$pattern"* ]] && [ "$cur_line" = "$prev_line" ]; then
+                stuck_secs=$(( stuck_secs + 1 ))
+            else
+                stuck_secs=0
+            fi
+            prev_line="$cur_line"
+
+            if [ "$stuck_secs" -ge "$timeout_secs" ]; then
+                echo -e "\n${BRED}>>> Stuck on '${pattern}' for ${timeout_secs}s - killing it...${NC}"
+                kill -TERM "$cmd_pid" 2>/dev/null
+                sleep 1
+                kill -KILL "$cmd_pid" 2>/dev/null
+                break
+            fi
+        done
     ) &
     local watchdog_pid=$!
 
     wait "$cmd_pid" 2>/dev/null
     local status=$?
     kill "$watchdog_pid" 2>/dev/null
-    rm -f "$out_pipe"
+    rm -f "$out_file"
     return $status
 }
 
@@ -1655,10 +1677,10 @@ install_extension() {
 
     clear_blueprint_lock
 
-    # Watchdog: if `blueprint -i` stalls (e.g. sits at the same % forever),
-    # kill it after EXT_STUCK_TIMEOUT seconds of no new output and move on,
-    # instead of hanging the whole install run.
-    run_with_stuck_watchdog "$EXT_STUCK_TIMEOUT" blueprint -i "$name"
+    # Watchdog: if `blueprint -i` freezes on a line containing
+    # EXT_STUCK_PATTERN (e.g. "46%") for EXT_STUCK_TIMEOUT seconds
+    # straight, kill it and move on instead of hanging the whole run.
+    run_with_stuck_watchdog "$EXT_STUCK_PATTERN" "$EXT_STUCK_TIMEOUT" blueprint -i "$name"
     local install_status=$?
 
     rm -f "${name}.blueprint"
@@ -1680,7 +1702,10 @@ uninstall_extension() {
     echo -e "${BCYAN}>>> Removing extension: ${name}...${NC}"
     cd "$PTERODACTYL_DIR" || { echo -e "${BRED}Path not found!${NC}"; sleep 2; return; }
 
-    blueprint -r "$name"
+    # blueprint -r asks its own "are you sure? (y/n)" per extension - feed it
+    # an endless stream of "y" so a bulk removal doesn't stop and wait on
+    # every single one.
+    yes y | blueprint -r "$name"
 
     echo -e "${BGREEN}>>> ${name} removed!${NC}"
     sleep 2
@@ -1689,7 +1714,7 @@ uninstall_extension() {
 install_all_extensions() {
     echo ""
     echo -e "${BYELLOW}This will install all ${#EXTENSIONS[@]} extensions one by one. This may take a while.${NC}"
-    echo -e "${BYELLOW}Any extension stuck for more than ${EXT_STUCK_TIMEOUT}s will be auto-skipped.${NC}"
+    echo -e "${BYELLOW}Any extension stuck on '${EXT_STUCK_PATTERN}' for more than ${EXT_STUCK_TIMEOUT}s will be auto-skipped.${NC}"
     read -rp "$(echo -e ${YELLOW}"Continue? (y/n): "${NC})" confirm_ans
     if [[ ! "$confirm_ans" =~ ^[Yy]$ ]]; then
         return
@@ -1717,7 +1742,7 @@ install_template_extensions() {
         echo -e "  ${BCYAN}❯${NC} ${name}"
     done
     echo ""
-    echo -e "${BYELLOW}Any extension stuck for more than ${EXT_STUCK_TIMEOUT}s will be auto-skipped.${NC}"
+    echo -e "${BYELLOW}Any extension stuck on '${EXT_STUCK_PATTERN}' for more than ${EXT_STUCK_TIMEOUT}s will be auto-skipped.${NC}"
     read -rp "$(echo -e ${YELLOW}"Install these ${#TEMPLATE_EXTENSIONS[@]} extensions? (y/n): "${NC})" confirm_ans
     if [[ ! "$confirm_ans" =~ ^[Yy]$ ]]; then
         return
@@ -1756,7 +1781,7 @@ extensions_library_menu() {
         echo -e "${BCYAN}${BOLD}▸ Extensions Library${NC}"
         echo -e "${BCYAN}─────────────────────${NC}"
         echo -e "${YELLOW}${total} extensions available${NC}"
-        echo -e "${YELLOW}Stuck installs are auto-skipped after ${EXT_STUCK_TIMEOUT}s of no output${NC}"
+        echo -e "${YELLOW}Stuck on '${EXT_STUCK_PATTERN}' for ${EXT_STUCK_TIMEOUT}s -> auto-skipped${NC}"
         echo ""
 
         local start=$(( page * page_size ))
