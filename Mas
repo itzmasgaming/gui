@@ -7,6 +7,11 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v2.6 - Wings Auto: fixed 403 AccessDeniedHttpException - daemon_token
+#          is stored Laravel-encrypted at rest; we were writing the raw
+#          ciphertext into config.yml instead of the decrypted plaintext
+#          secret. Now explicitly decrypts via Crypt::decryptString()
+#          with a safe fallback.
 #   v2.5 - Wings Auto: fixed a real-world SQL error - the field is
 #          'daemonSFTP' (caps), not 'daemonSftp'; MySQL treated the two
 #          as the same column and threw "specified twice"
@@ -20,7 +25,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="2.5"
+SCRIPT_VERSION="2.6"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -958,7 +963,12 @@ if (!\$location) {
     'behind_proxy' => false,
     'maintenance_mode' => false,
 ]);
-echo 'AUTONODE_RESULT:'.\$node->uuid.'|'.\$node->daemon_token_id.'|'.\$node->daemon_token.'|'.\$node->fqdn;
+try {
+    \$plainToken = \Illuminate\Support\Facades\Crypt::decryptString(\$node->daemon_token);
+} catch (\Exception \$e) {
+    \$plainToken = \$node->daemon_token;
+}
+echo 'AUTONODE_RESULT:'.\$node->uuid.'|'.\$node->daemon_token_id.'|'.\$plainToken.'|'.\$node->fqdn;
 " 2>&1)
 
     local result_line
