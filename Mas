@@ -1247,7 +1247,7 @@ run_theme_aric() {
     bash <(curl -sL https://arix.skacloud.qzz.io/) <<EOF
 1
 1
-2
+1
 1
 "$aric_email"
 "$aric_license"
