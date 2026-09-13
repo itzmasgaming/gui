@@ -4,6 +4,16 @@
 #  MAS Gui - Pterodactyl Panel + Wings installer/manager
 #  Run with: bash <(curl -s https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas)
 # ============================================================
+#
+# CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
+# so the banner always reflects exactly what's running):
+#   v2.3 - Bumped version display to a variable + started this changelog
+#   v2.2 - "MAS GUI" title recolored from magenta to bright aqua/cyan
+#   v2.1 - Banner outline recolored to bright red (heavy box), main menu
+#          icons added
+# ============================================================
+
+SCRIPT_VERSION="2.3"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -74,7 +84,7 @@ banner() {
     echo -e "${BRED}${BOLD}┃${NC}${BOLD}${BBCYAN}$(center "◆ MAS GUI ◆")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}${BCYAN}$(center "Pterodactyl Panel + Wings Toolkit")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}${YELLOW}$(center "ɪᴛᴢᴍᴀꜱɢᴀᴍɪɴɢ")${NC}${BRED}${BOLD}┃${NC}"
-    echo -e "${BRED}${BOLD}┃${NC}${WHITE}$(center "v2.1")${NC}${BRED}${BOLD}┃${NC}"
+    echo -e "${BRED}${BOLD}┃${NC}${WHITE}$(center "v${SCRIPT_VERSION}")${NC}${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┃${NC}$(center "" )${BRED}${BOLD}┃${NC}"
     echo -e "${BRED}${BOLD}┗${line}┛${NC}"
     echo ""
