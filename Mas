@@ -7,6 +7,10 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v3.1 - Extensions Library: comma-separated multi-select, e.g.
+#          "1,2,4,7,9" installs those numbers, "r1,2,4,7,9" removes
+#          them. Invalid numbers in the list are skipped with a
+#          warning, valid ones still run.
 #   v3.0 - Extensions Library: new "best" command installs your curated
 #          list (same 18 names as the "keep" list) but first checks each
 #          one against the source repo (HTTP HEAD, no download) - any
@@ -49,7 +53,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="3.1"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -2002,6 +2006,7 @@ extensions_library_menu() {
         echo -e "  ${BGREEN}●${NC} installed   ${BRED}○${NC} not installed"
         echo -e "  Page $((page+1))/${total_pages}   ${YELLOW}n${NC})Next   ${YELLOW}p${NC})Prev   ${BRED}0${NC})Back"
         echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
+        echo -e "  ${WHITE}Install several:${NC} comma-separate (e.g. ${BCYAN}1,2,4,7,9${NC})   ${WHITE}Remove several:${NC} ${BRED}r1,2,4,7,9${NC}"
         echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
         echo -e "  ${WHITE}Install best-for-hosting bundle:${NC} ${BCYAN}template${NC}   ${WHITE}Remove it:${NC} ${BRED}r template${NC}"
         echo -e "  ${WHITE}Install your curated \"best\" list (only what's actually available):${NC} ${BCYAN}best${NC}"
@@ -2030,6 +2035,39 @@ extensions_library_menu() {
             install_best_extensions
         elif [[ "$choice" == "keep" ]]; then
             prune_to_keep_list
+        elif [[ "$choice" =~ ^r[0-9]+(,[0-9]+)+$ ]]; then
+            local nums_str="${choice#r}"
+            local n valid=() invalid=()
+            IFS=',' read -ra nums <<< "$nums_str"
+            for n in "${nums[@]}"; do
+                if (( n >= 1 && n <= total )); then
+                    valid+=("$n")
+                else
+                    invalid+=("$n")
+                fi
+            done
+            if [ "${#invalid[@]}" -gt 0 ]; then
+                echo -e "${BRED}Skipping invalid number(s): ${invalid[*]}${NC}"; sleep 1
+            fi
+            for n in "${valid[@]}"; do
+                uninstall_extension "${EXTENSIONS[$((n-1))]}"
+            done
+        elif [[ "$choice" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
+            local n valid=() invalid=()
+            IFS=',' read -ra nums <<< "$choice"
+            for n in "${nums[@]}"; do
+                if (( n >= 1 && n <= total )); then
+                    valid+=("$n")
+                else
+                    invalid+=("$n")
+                fi
+            done
+            if [ "${#invalid[@]}" -gt 0 ]; then
+                echo -e "${BRED}Skipping invalid number(s): ${invalid[*]}${NC}"; sleep 1
+            fi
+            for n in "${valid[@]}"; do
+                install_extension "${EXTENSIONS[$((n-1))]}"
+            done
         elif [[ "$choice" =~ ^r([0-9]+)$ ]]; then
             local num="${BASH_REMATCH[1]}"
             if (( num >= 1 && num <= total )); then
