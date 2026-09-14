@@ -7,6 +7,11 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v3.0 - Extensions Library: new "best" command installs your curated
+#          list (same 18 names as the "keep" list) but first checks each
+#          one against the source repo (HTTP HEAD, no download) - any
+#          that don't actually exist there are skipped silently, no
+#          error shown, nothing else changes.
 #   v2.9 - New main menu option "10) Auto Setup": runs Panel install
 #          (FQDN: mashosting.bond) -> system update -> Cloudflare tunnel
 #          (background) -> Blueprint install -> Nebula theme -> Wings
@@ -44,7 +49,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="2.9"
+SCRIPT_VERSION="3.0"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -1803,6 +1808,52 @@ prune_to_keep_list() {
     pause
 }
 
+# True (0) if <repo>/<name>.blueprint actually exists (HTTP HEAD check),
+# without downloading it.
+extension_exists_upstream() {
+    local name="$1"
+    wget -q --spider "${EXTENSION_REPO_BASE}/${name}.blueprint" 2>/dev/null
+}
+
+# Installs every extension in KEEP_EXTENSIONS ("best" bundle) that is
+# currently NOT installed. Anything whose .blueprint file isn't found at
+# the source repo is skipped silently - no error, it's just left out.
+install_best_extensions() {
+    echo ""
+    echo -e "${BCYAN}>>> Checking which of the ${#KEEP_EXTENSIONS[@]} best extensions are available...${NC}"
+
+    local to_install=()
+    local name
+    for name in "${KEEP_EXTENSIONS[@]}"; do
+        is_extension_installed "$name" && continue
+        extension_exists_upstream "$name" && to_install+=("$name")
+    done
+
+    if [ "${#to_install[@]}" -eq 0 ]; then
+        echo -e "${BGREEN}>>> Nothing to install - already up to date (or nothing available right now).${NC}"
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "${BCYAN}${BOLD}Will install:${NC}"
+    for name in "${to_install[@]}"; do
+        echo -e "  ${BCYAN}❯${NC} ${name}"
+    done
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Install these ${#to_install[@]} extensions? (y/n): "${NC})" confirm_ans
+    if [[ ! "$confirm_ans" =~ ^[Yy]$ ]]; then
+        return
+    fi
+
+    for name in "${to_install[@]}"; do
+        install_extension "$name"
+    done
+
+    echo -e "${BGREEN}>>> Best extensions installed.${NC}"
+    pause
+}
+
 # Blueprint Framework installs each extension into its own folder under
 # .blueprint/extensions/<name>/ - use that to detect install status.
 is_extension_installed() {
@@ -1953,6 +2004,7 @@ extensions_library_menu() {
         echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
         echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
         echo -e "  ${WHITE}Install best-for-hosting bundle:${NC} ${BCYAN}template${NC}   ${WHITE}Remove it:${NC} ${BRED}r template${NC}"
+        echo -e "  ${WHITE}Install your curated \"best\" list (only what's actually available):${NC} ${BCYAN}best${NC}"
         echo -e "  ${WHITE}Keep only your keep-list, remove the rest installed:${NC} ${BRED}keep${NC}"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" raw_choice
@@ -1974,6 +2026,8 @@ extensions_library_menu() {
             install_template_extensions
         elif [[ "$choice" == "rtemplate" ]]; then
             uninstall_template_extensions
+        elif [[ "$choice" == "best" ]]; then
+            install_best_extensions
         elif [[ "$choice" == "keep" ]]; then
             prune_to_keep_list
         elif [[ "$choice" =~ ^r([0-9]+)$ ]]; then
