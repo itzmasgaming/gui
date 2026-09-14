@@ -7,6 +7,15 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v2.9 - New main menu option "10) Auto Setup": runs Panel install
+#          (FQDN: mashosting.bond) -> system update -> Cloudflare tunnel
+#          (background) -> Blueprint install -> Nebula theme -> Wings
+#          install+docker+fix end to end, unattended. The ONLY prompt is
+#          the Cloudflare tunnel token, asked up front. Refactored
+#          run_install/run_cloudflare_background/run_blueprint_install/
+#          run_wings_install_docker_fix into core+wrapper pairs so both
+#          the menu and Auto Setup share the same code with no
+#          leftover mid-run "press enter" pauses.
 #   v2.8 - Extensions Library watchdog narrowed: it now only fires when
 #          the LAST output line contains "46" (matching the observed
 #          "stuck at 46%" freeze) and stays unchanged for 16s straight -
@@ -35,7 +44,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="2.8"
+SCRIPT_VERSION="2.9"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -293,24 +302,42 @@ run_cloudflare_foreground() {
     pause
 }
 
-run_cloudflare_background() {
-    if ! command -v cloudflared >/dev/null 2>&1; then
-        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
-        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
-        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
-            install_cloudflare
-        fi
-        if ! command -v cloudflared >/dev/null 2>&1; then
-            pause
-            return
-        fi
+# Installs cloudflared with no prompts (used by Auto Setup and as a
+# fallback inside the interactive Cloudflare menu functions). Returns 0
+# on success.
+install_cloudflare_silent() {
+    if command -v cloudflared >/dev/null 2>&1; then
+        return 0
     fi
-    echo ""
-    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
-    if [ -z "$cf_token" ]; then
-        echo -e "${BRED}Token is required. Aborting.${NC}"
-        pause
-        return
+
+    echo -e "${BCYAN}>>> Installing cloudflared...${NC}"
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl >/dev/null 2>&1
+
+    local cf_arch
+    case "$(uname -m)" in
+        x86_64) cf_arch="amd64" ;;
+        aarch64|arm64) cf_arch="arm64" ;;
+        armv7l) cf_arch="arm" ;;
+        *) cf_arch="amd64" ;;
+    esac
+
+    if ! curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
+        echo -e "${BRED}cloudflared download failed. Check your network/internet connection.${NC}"
+        return 1
+    fi
+    chmod +x /usr/local/bin/cloudflared
+    ln -sf /usr/local/bin/cloudflared /usr/bin/cloudflared 2>/dev/null
+    command -v cloudflared >/dev/null 2>&1
+}
+
+# Core of "run in background (systemd)" with the token passed in directly -
+# no prompts, no pause(). Shared by the interactive menu and Auto Setup.
+cloudflare_background_core() {
+    local cf_token="$1"
+
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        install_cloudflare_silent || return 1
     fi
 
     echo -e "${BCYAN}>>> Creating cloudflared.service...${NC}"
@@ -336,6 +363,29 @@ SERVICE_EOF
     echo ""
     echo -e "${BCYAN}>>> Cloudflare tunnel running in background. Check logs anytime with:${NC}"
     echo -e "    ${YELLOW}journalctl -u cloudflared -f${NC}"
+}
+
+run_cloudflare_background() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${BRED}cloudflared is not installed on this system.${NC}"
+        read -rp "$(echo -e ${YELLOW}"Install it now? (y/n): "${NC})" cf_install_ans
+        if [[ "$cf_install_ans" =~ ^[Yy]$ ]]; then
+            install_cloudflare
+        fi
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            pause
+            return
+        fi
+    fi
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" cf_token
+    if [ -z "$cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting.${NC}"
+        pause
+        return
+    fi
+
+    cloudflare_background_core "$cf_token"
     pause
 }
 
@@ -517,6 +567,22 @@ run_install() {
     echo ""
     build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
     pause
+}
+
+# Core of a fresh Panel install with NO interactive prompts - every CFG_*
+# value is set directly from the argument / defaults. Used by Auto Setup.
+run_install_silent() {
+    local fqdn="$1"
+    CFG_FQDN="${fqdn:-mashosting.bond}"
+    CFG_EMAIL="admin@gmail.com"
+    CFG_ADMIN_EMAIL="admin@admin.com"
+    CFG_ADMIN_USERNAME="admin"
+    CFG_ADMIN_PASSWORD="12345678"
+
+    echo ""
+    echo -e "${BGREEN}>>> Starting fresh Pterodactyl Panel install (FQDN: ${CFG_FQDN})...${NC}"
+    echo ""
+    build_answers_fresh_install | bash <(curl -s "$PANEL_INSTALLER_URL")
 }
 
 run_reinstall() {
@@ -763,7 +829,7 @@ panel_setup_menu() {
 # ============================================================
 # WINGS - install + docker + fix
 # ============================================================
-run_wings_install_docker_fix() {
+wings_install_docker_fix_core() {
     echo ""
     echo -e "${BGREEN}>>> Wings install + docker + fix - starting...${NC}"
     echo ""
@@ -817,6 +883,10 @@ EOF
 
     echo ""
     echo -e "${BGREEN}>>> Wings install + docker + fix complete.${NC}"
+}
+
+run_wings_install_docker_fix() {
+    wings_install_docker_fix_core
     pause
 }
 
@@ -1328,12 +1398,7 @@ run_system_spec() {
 # ============================================================
 # BLUEPRINT & THEMES
 # ============================================================
-run_blueprint_install() {
-    banner
-    echo -e "${BCYAN}${BOLD}▸ Blueprint Install${NC}"
-    echo -e "${BCYAN}───────────────────${NC}"
-    echo ""
-
+blueprint_install_core() {
     echo -e "${BCYAN}>>> Running system update first...${NC}"
     apt update
     apt upgrade -y
@@ -1449,6 +1514,14 @@ EOF
 
     echo ""
     echo -e "${BCYAN}>>> Blueprint install + repair complete.${NC}"
+}
+
+run_blueprint_install() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Blueprint Install${NC}"
+    echo -e "${BCYAN}───────────────────${NC}"
+    echo ""
+    blueprint_install_core
     pause
 }
 
@@ -2174,6 +2247,69 @@ uninstall_menu() {
 }
 
 # ============================================================
+# AUTO SETUP - one-shot end-to-end provisioning
+# ============================================================
+# Runs, in order: fresh Panel install (FQDN below) -> system update ->
+# Cloudflare tunnel in background -> Blueprint install -> Nebula theme ->
+# Wings install + docker + fix. The ONLY thing it asks you for is the
+# Cloudflare tunnel token - everything else uses the same defaults as the
+# rest of the script. Edit AUTO_SETUP_FQDN below if mashosting.bond isn't
+# the domain you want.
+AUTO_SETUP_FQDN="mashosting.bond"
+
+run_auto_setup() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Auto Setup${NC}"
+    echo -e "${BCYAN}────────────${NC}"
+    echo ""
+    echo -e "${BYELLOW}This runs, unattended, in order:${NC}"
+    echo -e "  ${BCYAN}1)${NC} Fresh Panel install (FQDN: ${YELLOW}${AUTO_SETUP_FQDN}${NC})"
+    echo -e "  ${BCYAN}2)${NC} System update (apt update && apt upgrade -y)"
+    echo -e "  ${BCYAN}3)${NC} Cloudflare tunnel, run in background"
+    echo -e "  ${BCYAN}4)${NC} Blueprint install"
+    echo -e "  ${BCYAN}5)${NC} Nebula theme"
+    echo -e "  ${BCYAN}6)${NC} Wings install + docker + fix"
+    echo ""
+    echo -e "${BYELLOW}The only thing it needs from you is the Cloudflare tunnel token.${NC}"
+    echo ""
+    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" as_cf_token
+    if [ -z "$as_cf_token" ]; then
+        echo -e "${BRED}Token is required. Aborting Auto Setup.${NC}"
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [1/6] Panel install...${NC}"
+    run_install_silent "$AUTO_SETUP_FQDN"
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [2/6] System update...${NC}"
+    apt update
+    apt upgrade -y
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [3/6] Cloudflare tunnel (background)...${NC}"
+    cloudflare_background_core "$as_cf_token"
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [4/6] Blueprint install...${NC}"
+    blueprint_install_core
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [5/6] Nebula theme...${NC}"
+    run_theme_nebula
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> [6/6] Wings install + docker + fix...${NC}"
+    wings_install_docker_fix_core
+
+    echo ""
+    echo -e "${BGREEN}${BOLD}>>> Auto Setup complete!${NC}"
+    pause
+}
+
+# ============================================================
 # CREDITS
 # ============================================================
 show_credits() {
@@ -2200,6 +2336,7 @@ show_menu() {
     echo -e "  ❯ ${BCYAN}7${NC} 📦  Installed Apps"
     echo -e "  ❯ ${BCYAN}8${NC} 💬  Credits"
     echo -e "  ❯ ${BCYAN}9${NC} 🗑️  Uninstall"
+    echo -e "  ❯ ${BYELLOW}10${NC} 🚀  Auto Setup ${BYELLOW}[Panel + Cloudflare + Blueprint + Nebula + Wings]${NC}"
     echo -e "  ❯ ${BRED}0${NC} ✖️  Exit"
     echo ""
     read -rp "$(echo -e ${BCYAN}${BOLD}"Select an option: "${NC})" choice
@@ -2214,6 +2351,7 @@ show_menu() {
         7) run_installed_apps ;;
         8) show_credits ;;
         9) uninstall_menu ;;
+        10) run_auto_setup ;;
         0) exit 0 ;;
         *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
     esac
