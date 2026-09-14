@@ -1656,6 +1656,80 @@ TEMPLATE_EXTENSIONS=(
     huxregister
 )
 
+# Snapshot of the extensions you actually want kept (from your installed
+# list) - used by the "keep" command in the Extensions Library to strip
+# out everything else that's currently installed. Edit this list any time
+# your "keep" set changes.
+KEEP_EXTENSIONS=(
+    versionchanger
+    mcplugins
+    minecraftplayermanager
+    huxregister
+    resourcemanager
+    autobackups
+    eggchanger
+    sagaautosuspension
+    snowflakes
+    adminauditlogs
+    mcplayer
+    motdmaker
+    servericonimporter
+    serversplitter
+    modrinthbrowser
+    sagaminecraftmodpackinstaller
+    serverpropsmanager
+    subdomainmanager
+)
+
+# True (0) if $1 is present in the array named $2.
+is_in_array() {
+    local needle="$1" name="$2[@]"
+    local hay
+    for hay in "${!name}"; do
+        [ "$hay" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+# Uninstalls every currently-installed extension that is NOT in
+# KEEP_EXTENSIONS. One confirmation code total, no per-item prompts.
+prune_to_keep_list() {
+    local to_remove=()
+    local name
+    for name in "${EXTENSIONS[@]}"; do
+        if is_extension_installed "$name" && ! is_in_array "$name" "KEEP_EXTENSIONS"; then
+            to_remove+=("$name")
+        fi
+    done
+
+    if [ "${#to_remove[@]}" -eq 0 ]; then
+        echo ""
+        echo -e "${BGREEN}>>> Nothing to remove - every installed extension is already on the keep list.${NC}"
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "${BCYAN}${BOLD}Keeping:${NC}"
+    for name in "${KEEP_EXTENSIONS[@]}"; do
+        is_extension_installed "$name" && echo -e "  ${BGREEN}❯${NC} ${name}"
+    done
+    echo ""
+    echo -e "${BRED}${BOLD}Will remove (installed but not on the keep list):${NC}"
+    for name in "${to_remove[@]}"; do
+        echo -e "  ${BRED}❯${NC} ${name}"
+    done
+
+    confirm_destructive "${#to_remove[@]} installed extension(s) not on your keep list" || return
+
+    for name in "${to_remove[@]}"; do
+        uninstall_extension "$name"
+    done
+
+    echo -e "${BGREEN}>>> Pruned. Only your keep-list extensions remain installed.${NC}"
+    pause
+}
+
 # Blueprint Framework installs each extension into its own folder under
 # .blueprint/extensions/<name>/ - use that to detect install status.
 is_extension_installed() {
@@ -1806,6 +1880,7 @@ extensions_library_menu() {
         echo -e "  ${WHITE}Install:${NC} type a number (e.g. ${BCYAN}23${NC})   ${WHITE}Remove:${NC} r + number (e.g. ${BRED}r23${NC})"
         echo -e "  ${WHITE}Install ALL:${NC} ${BCYAN}all${NC}   ${WHITE}Remove ALL:${NC} ${BRED}r all${NC}"
         echo -e "  ${WHITE}Install best-for-hosting bundle:${NC} ${BCYAN}template${NC}   ${WHITE}Remove it:${NC} ${BRED}r template${NC}"
+        echo -e "  ${WHITE}Keep only your keep-list, remove the rest installed:${NC} ${BRED}keep${NC}"
         echo ""
         read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" raw_choice
 
@@ -1826,6 +1901,8 @@ extensions_library_menu() {
             install_template_extensions
         elif [[ "$choice" == "rtemplate" ]]; then
             uninstall_template_extensions
+        elif [[ "$choice" == "keep" ]]; then
+            prune_to_keep_list
         elif [[ "$choice" =~ ^r([0-9]+)$ ]]; then
             local num="${BASH_REMATCH[1]}"
             if (( num >= 1 && num <= total )); then
