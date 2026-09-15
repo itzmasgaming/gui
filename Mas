@@ -7,6 +7,12 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v3.2 - Extensions Library: fixes the "500 error" a lot of extensions
+#          were causing after install/uninstall. Every extension
+#          install/removal now clears Laravel's route/view/config cache
+#          and re-applies www-data ownership + permissions right after
+#          (same steps master_fix.sh already ran once during the initial
+#          Blueprint install, now run after every single change).
 #   v3.1 - Extensions Library: comma-separated multi-select, e.g.
 #          "1,2,4,7,9" installs those numbers, "r1,2,4,7,9" removes
 #          them. Invalid numbers in the list are skipped with a
@@ -53,7 +59,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="3.1"
+SCRIPT_VERSION="3.2"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -1865,6 +1871,20 @@ is_extension_installed() {
     [ -d "$PTERODACTYL_DIR/.blueprint/extensions/$name" ]
 }
 
+# Extensions add new routes/views that Laravel may still be serving from
+# stale cache -> that's what causes a 500 error right after installing or
+# removing one. Clear the caches + fix ownership every time, same steps
+# master_fix.sh already does during the initial Blueprint install.
+blueprint_cache_fix() {
+    cd "$PTERODACTYL_DIR" || return
+    php artisan optimize:clear >/dev/null 2>&1
+    php artisan config:clear >/dev/null 2>&1
+    php artisan view:clear >/dev/null 2>&1
+    php artisan route:clear >/dev/null 2>&1
+    chown -R www-data:www-data "$PTERODACTYL_DIR" 2>/dev/null
+    chmod -R 755 "$PTERODACTYL_DIR/storage" "$PTERODACTYL_DIR/bootstrap/cache" 2>/dev/null
+}
+
 install_extension() {
     local name="$1"
     echo ""
@@ -1887,6 +1907,7 @@ install_extension() {
 
     rm -f "${name}.blueprint"
     clear_blueprint_lock
+    blueprint_cache_fix
 
     if [ "$install_status" -eq 124 ]; then
         echo -e "${BRED}>>> ${name} timed out (stuck) and was skipped.${NC}"
@@ -1908,6 +1929,7 @@ uninstall_extension() {
     # an endless stream of "y" so a bulk removal doesn't stop and wait on
     # every single one.
     yes y | blueprint -r "$name"
+    blueprint_cache_fix
 
     echo -e "${BGREEN}>>> ${name} removed!${NC}"
     sleep 2
