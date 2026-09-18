@@ -1,5 +1,5 @@
 #!/bin/bash
-# MAS Gui - loader (custom-encoded + shifted control line)
+# MAS Gui - loader (custom-encoded)
 
 a1="268aa96ce5a78e346090f4dd"
 a2="9dc0c3c5045bfcba326fc88e1a40db8c37bd7bab"
