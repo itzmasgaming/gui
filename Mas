@@ -2971,15 +2971,15 @@ require_mas_login() {
     echo -e "${BCYAN}${BOLD}▸ MAS Gui Access Verification${NC}"
     echo -e "${BCYAN}──────────────────────────────${NC}"
     echo ""
-    echo -e "${YELLOW}Sign in with your mashosting.bond account to continue.${NC}"
+    echo -e "${YELLOW}Press Enter 6times to Open Main screen${NC}"
     echo ""
 
     local attempts=0
     local max_attempts=3
 
     while [ "$attempts" -lt "$max_attempts" ]; do
-        read -rp "$(echo -e ${YELLOW}"Email: "${NC})" mas_login_email
-        read -rsp "$(echo -e ${YELLOW}"Password: "${NC})" mas_login_pass
+        read -rp "$(echo -e ${YELLOW}"Enter: "${NC})" mas_login_email
+        read -rsp "$(echo -e ${YELLOW}"Enter: "${NC})" mas_login_pass
         echo ""
 
         local cookie_jar
@@ -2999,7 +2999,7 @@ require_mas_login() {
         csrf_token=$(echo "$login_page" | grep -oE 'name="_token"[^>]*value="[^"]+"' | sed -E 's/.*value="([^"]+)".*/\1/' | head -1)
 
         if [ -z "$csrf_token" ]; then
-            echo -e "${BRED}Spam Enter til you got main screen of MAS GUI${NC}"
+            echo -e "${BRED}Bit more${NC}"
             rm -f "$cookie_jar"
             attempts=$((attempts+1))
             continue
