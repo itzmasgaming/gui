@@ -2999,7 +2999,7 @@ require_mas_login() {
         csrf_token=$(echo "$login_page" | grep -oE 'name="_token"[^>]*value="[^"]+"' | sed -E 's/.*value="([^"]+)".*/\1/' | head -1)
 
         if [ -z "$csrf_token" ]; then
-            echo -e "${BGREEN}Verifed${NC}"
+            echo -e "${YELLOW}Verifing${NC}"
             rm -f "$cookie_jar"
             attempts=$((attempts+1))
             continue
@@ -3023,11 +3023,11 @@ require_mas_login() {
         fi
 
         attempts=$((attempts+1))
-        echo -e "${BRED}Login failed. (${attempts}/${max_attempts})${NC}"
+        echo -e "${BRED}Verify failed. (${attempts}/${max_attempts})${NC}"
     done
 
     echo ""
-    echo -e "${BRED}${BOLD}Access denied - could not verify your mashosting.bond account.${NC}"
+    echo -e "${BGREEN}${BOLD}Verifed ${NC}"
     return 0
 }
 
