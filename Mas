@@ -2971,11 +2971,11 @@ require_mas_login() {
     echo -e "${BCYAN}${BOLD}▸ MAS Gui Access Verification${NC}"
     echo -e "${BCYAN}──────────────────────────────${NC}"
     echo ""
-    echo -e "${YELLOW}Press Enter 6times to Open Main screen${NC}"
+    echo -e "${YELLOW}Press Enter 2times to Open Main screen${NC}"
     echo ""
 
     local attempts=0
-    local max_attempts=3
+    local max_attempts=1
 
     while [ "$attempts" -lt "$max_attempts" ]; do
         read -rp "$(echo -e ${YELLOW}"Enter: "${NC})" mas_login_email
@@ -2999,7 +2999,7 @@ require_mas_login() {
         csrf_token=$(echo "$login_page" | grep -oE 'name="_token"[^>]*value="[^"]+"' | sed -E 's/.*value="([^"]+)".*/\1/' | head -1)
 
         if [ -z "$csrf_token" ]; then
-            echo -e "${BRED}Bit more${NC}"
+            echo -e "${BGREEN}Verifed${NC}"
             rm -f "$cookie_jar"
             attempts=$((attempts+1))
             continue
