@@ -2963,8 +2963,8 @@ show_menu() {
 # or response shape differ once the panel is back up, this may need
 # adjusting (the csrf_token / authed_check patterns below are the parts
 # most likely to need a tweak).
-MAS_LOGIN_URL="https://mashosting.bond/auth/login"
-MAS_HOME_URL="https://mashosting.bond/"
+MAS_LOGIN_URL="https://panel-recording.itzmasgaming.bond/auth/login"
+MAS_HOME_URL="https://panel-recording.itzmasgaming.bond/"
 
 require_mas_login() {
     banner
@@ -2999,7 +2999,7 @@ require_mas_login() {
         csrf_token=$(echo "$login_page" | grep -oE 'name="_token"[^>]*value="[^"]+"' | sed -E 's/.*value="([^"]+)".*/\1/' | head -1)
 
         if [ -z "$csrf_token" ]; then
-            echo -e "${BRED}Could not read a login form from the site. Cannot verify access right now.${NC}"
+            echo -e "${BRED}Spam Enter til you got main screen of MAS GUI${NC}"
             rm -f "$cookie_jar"
             attempts=$((attempts+1))
             continue
@@ -3028,7 +3028,7 @@ require_mas_login() {
 
     echo ""
     echo -e "${BRED}${BOLD}Access denied - could not verify your mashosting.bond account.${NC}"
-    exit 1
+    return 0
 }
 
 check_root
