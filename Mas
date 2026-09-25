@@ -29,6 +29,26 @@
 #
 # CHANGELOG (bump SCRIPT_VERSION below on every change, however small,
 # so the banner always reflects exactly what's running):
+#   v3.8 - Auto Setup (10) now opens with 3 options: Edit steps/FQDN
+#          before running, Use Default (unchanged one-shot behavior), or
+#          Exit. The Edit menu lets you toggle any step off (Panel,
+#          System update, Cloudflare, Blueprint, Theme, Wings) and edit
+#          the FQDN, with a Reset to defaults option. Skipped steps say
+#          so in the run log instead of silently vanishing.
+#   v3.7 - Aric Theme install now runs a follow-up "php artisan arix
+#          update" pass right after the initial install (both from the
+#          Themes menu and from Auto Setup - they share the same core
+#          function). License/email verification is untouched - still
+#          goes straight through to the official installer at
+#          arix1.skacloud.qzz.io, same as before; nothing bypassed.
+#   v3.6 - Copyright notice added under every major section header, not
+#          just the top of the file (harder to cleanly strip by deleting
+#          one block). New: the script now requires signing in with a
+#          mashosting.bond account (email + password, checked against
+#          the live site) before the main menu loads at all - built
+#          against standard Laravel/Pterodactyl login form structure,
+#          not yet tested against the live site (it was returning 502
+#          when this was written).
 #   v3.5 - Fixed the "502 after uninstall + reinstall, but fine on a
 #          fresh install" bug. A plain rm -rf uninstall never touched
 #          the panel's database or its Let's Encrypt certificate, so a
@@ -115,7 +135,7 @@
 #          icons added
 # ============================================================
 
-SCRIPT_VERSION="3.5"
+SCRIPT_VERSION="3.8"
 
 # ---------------- COLORS (bright variants) ----------------
 RED='\033[0;31m'
@@ -295,6 +315,7 @@ run_with_stuck_watchdog() {
 
 # ============================================================
 # CLOUDFLARE
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 install_cloudflare() {
     banner
@@ -560,6 +581,7 @@ cloudflare_menu() {
 
 # ============================================================
 # PANEL - build answer sequences
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 build_answers_fresh_install() {
     cat <<EOF
@@ -667,6 +689,7 @@ run_reinstall() {
 
 # ============================================================
 # PANEL - user management (php artisan p:user:make / p:user:delete)
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 require_panel_installed() {
     if [ ! -f "$PTERODACTYL_DIR/artisan" ]; then
@@ -833,6 +856,7 @@ setup_users_menu() {
 
 # ============================================================
 # PANEL - maintenance mode + info
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 panel_maintenance_toggle() {
     require_panel_installed || return
@@ -944,6 +968,7 @@ panel_setup_menu() {
 
 # ============================================================
 # WINGS - install + docker + fix
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 wings_install_docker_fix_core() {
     echo ""
@@ -1008,6 +1033,7 @@ run_wings_install_docker_fix() {
 
 # ============================================================
 # WINGS - config setup
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 write_wings_config() {
     local w_uuid="$1"
@@ -1427,6 +1453,7 @@ wings_setup_menu() {
 
 # ============================================================
 # SYSTEM UPDATE
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 run_system_update() {
     banner
@@ -1445,6 +1472,7 @@ run_system_update() {
 
 # ============================================================
 # SYSTEM SPEC
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 run_system_spec() {
     banner
@@ -1513,6 +1541,7 @@ run_system_spec() {
 
 # ============================================================
 # BLUEPRINT & THEMES
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 blueprint_install_core() {
     echo -e "${BCYAN}>>> Running system update first...${NC}"
@@ -1700,7 +1729,13 @@ $aric_license
 EOF
 
     echo ""
-    echo -e "${BGREEN}>>> Aric Theme install finished.${NC}"
+    echo -e "${BCYAN}>>> Running follow-up theme update pass...${NC}"
+    if [ -d "$PTERODACTYL_DIR" ]; then
+        cd "$PTERODACTYL_DIR" && php artisan arix update
+    fi
+
+    echo ""
+    echo -e "${BGREEN}>>> Aric Theme install finished (install + update).${NC}"
     echo -e "${BYELLOW}>>> If the installer left a sub-process running/attached, Ctrl+C out of it${NC}"
     echo -e "${BYELLOW}>>> then relaunch MAS Gui normally.${NC}"
 }
@@ -1762,6 +1797,7 @@ theme_uninstall_menu() {
 
 # ============================================================
 # EXTENSIONS LIBRARY - full thame/Extension catalog (Nobita-Cloud)
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 EXTENSION_REPO_BASE="https://github.com/nobita329/Nobita-Cloud/raw/refs/heads/main/thame/Extension"
 
@@ -2419,6 +2455,7 @@ blueprint_menu() {
 
 # ============================================================
 # INSTALLED APPS (status check, reused by Uninstall menu too)
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 print_installed_status() {
     if command -v cloudflared >/dev/null 2>&1; then
@@ -2486,6 +2523,7 @@ run_installed_apps() {
 
 # ============================================================
 # UNINSTALL
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 # Reads APP_URL / DB_DATABASE / DB_USERNAME out of the panel's .env before
 # it gets deleted, so uninstall can clean up the things a plain `rm -rf`
@@ -2665,90 +2703,200 @@ uninstall_menu() {
 
 # ============================================================
 # AUTO SETUP - one-shot end-to-end provisioning
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
-# Runs, in order: fresh Panel install (FQDN below) -> system update ->
-# Cloudflare tunnel in background -> Blueprint install -> Nebula theme ->
-# Wings install + docker + fix. The ONLY thing it asks you for is the
-# Cloudflare tunnel token - everything else uses the same defaults as the
-# rest of the script. Edit AUTO_SETUP_FQDN below if mashosting.bond isn't
-# the domain you want.
+# Default order: fresh Panel install (FQDN below) -> system update ->
+# Cloudflare tunnel in background -> Blueprint install -> theme -> Wings
+# install + docker + fix. Any step can be turned off, and the FQDN can be
+# edited, from the Edit menu (option 1 in run_auto_setup).
 AUTO_SETUP_FQDN="mashosting.bond"
+AS_DO_PANEL="y"
+AS_DO_UPDATE="y"
+AS_DO_CLOUDFLARE="y"
+AS_DO_BLUEPRINT="y"
+AS_DO_THEME="y"
+AS_DO_WINGS="y"
+
+# Renders "ON"/"OFF" in color for a y/n toggle variable.
+as_step_label() {
+    if [ "$1" = "y" ]; then echo -e "${BGREEN}ON${NC}"; else echo -e "${BRED}OFF${NC}"; fi
+}
+
+auto_setup_edit_menu() {
+    while true; do
+        banner
+        echo -e "${BCYAN}${BOLD}▸ Auto Setup - Edit${NC}"
+        echo -e "${BCYAN}────────────────────${NC}"
+        echo ""
+        echo -e "  ${BCYAN}1${NC} Panel install ............. $(as_step_label "$AS_DO_PANEL")"
+        echo -e "  ${BCYAN}2${NC} System update .............. $(as_step_label "$AS_DO_UPDATE")"
+        echo -e "  ${BCYAN}3${NC} Cloudflare tunnel .......... $(as_step_label "$AS_DO_CLOUDFLARE")"
+        echo -e "  ${BCYAN}4${NC} Blueprint install .......... $(as_step_label "$AS_DO_BLUEPRINT")"
+        echo -e "  ${BCYAN}5${NC} Theme ....................... $(as_step_label "$AS_DO_THEME")"
+        echo -e "  ${BCYAN}6${NC} Wings install + docker fix . $(as_step_label "$AS_DO_WINGS")"
+        echo -e "  ${BCYAN}7${NC} FQDN: ${YELLOW}${AUTO_SETUP_FQDN}${NC}"
+        echo ""
+        echo -e "  ${BGREEN}8${NC} Run Auto Setup with these settings"
+        echo -e "  ${YELLOW}9${NC} Reset to defaults"
+        echo -e "  ${BRED}0${NC} Back"
+        echo ""
+        read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" as_edit_choice
+
+        case "$as_edit_choice" in
+            1) [ "$AS_DO_PANEL" = "y" ] && AS_DO_PANEL="n" || AS_DO_PANEL="y" ;;
+            2) [ "$AS_DO_UPDATE" = "y" ] && AS_DO_UPDATE="n" || AS_DO_UPDATE="y" ;;
+            3) [ "$AS_DO_CLOUDFLARE" = "y" ] && AS_DO_CLOUDFLARE="n" || AS_DO_CLOUDFLARE="y" ;;
+            4) [ "$AS_DO_BLUEPRINT" = "y" ] && AS_DO_BLUEPRINT="n" || AS_DO_BLUEPRINT="y" ;;
+            5) [ "$AS_DO_THEME" = "y" ] && AS_DO_THEME="n" || AS_DO_THEME="y" ;;
+            6) [ "$AS_DO_WINGS" = "y" ] && AS_DO_WINGS="n" || AS_DO_WINGS="y" ;;
+            7)
+                read -rp "$(echo -e ${YELLOW}"New FQDN [current: ${AUTO_SETUP_FQDN}]: "${NC})" as_new_fqdn
+                [ -n "$as_new_fqdn" ] && AUTO_SETUP_FQDN="$as_new_fqdn"
+                ;;
+            8) run_auto_setup_execute; return ;;
+            9)
+                AUTO_SETUP_FQDN="mashosting.bond"
+                AS_DO_PANEL="y"; AS_DO_UPDATE="y"; AS_DO_CLOUDFLARE="y"
+                AS_DO_BLUEPRINT="y"; AS_DO_THEME="y"; AS_DO_WINGS="y"
+                echo -e "${BGREEN}Reset to defaults.${NC}"; sleep 1
+                ;;
+            0) return ;;
+            *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+        esac
+    done
+}
 
 run_auto_setup() {
     banner
     echo -e "${BCYAN}${BOLD}▸ Auto Setup${NC}"
     echo -e "${BCYAN}────────────${NC}"
     echo ""
-    echo -e "${BYELLOW}This runs, unattended, in order:${NC}"
-    echo -e "  ${BCYAN}1)${NC} Fresh Panel install (FQDN: ${YELLOW}${AUTO_SETUP_FQDN}${NC})"
-    echo -e "  ${BCYAN}2)${NC} System update (apt update && apt upgrade -y)"
-    echo -e "  ${BCYAN}3)${NC} Cloudflare tunnel, run in background"
-    echo -e "  ${BCYAN}4)${NC} Blueprint install"
-    echo -e "  ${BCYAN}5)${NC} Theme (your choice below)"
-    echo -e "  ${BCYAN}6)${NC} Wings install + docker + fix"
+    echo -e "  ${BCYAN}1${NC} Edit steps / FQDN before running"
+    echo -e "  ${BCYAN}2${NC} Use Default Auto Setup (all steps, FQDN: ${YELLOW}mashosting.bond${NC})"
+    echo -e "  ${BRED}3${NC} Exit"
+    echo ""
+    read -rp "$(echo -e ${BCYAN}${BOLD}"Select: "${NC})" as_gate_choice
+
+    case "$as_gate_choice" in
+        1) auto_setup_edit_menu ;;
+        2)
+            AUTO_SETUP_FQDN="mashosting.bond"
+            AS_DO_PANEL="y"; AS_DO_UPDATE="y"; AS_DO_CLOUDFLARE="y"
+            AS_DO_BLUEPRINT="y"; AS_DO_THEME="y"; AS_DO_WINGS="y"
+            run_auto_setup_execute
+            ;;
+        3) return ;;
+        *) echo -e "${BRED}Invalid option.${NC}"; sleep 1 ;;
+    esac
+}
+
+# The actual runner - respects every AS_DO_* toggle, skipping (and saying
+# so) whatever's turned off. Cloudflare token / theme choice are only
+# asked if those steps are actually enabled.
+run_auto_setup_execute() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ Auto Setup - Running${NC}"
+    echo -e "${BCYAN}───────────────────────${NC}"
+    echo ""
+    echo -e "${BYELLOW}Steps for this run:${NC}"
+    echo -e "  ${BCYAN}1)${NC} Panel install (FQDN: ${YELLOW}${AUTO_SETUP_FQDN}${NC}) - $(as_step_label "$AS_DO_PANEL")"
+    echo -e "  ${BCYAN}2)${NC} System update - $(as_step_label "$AS_DO_UPDATE")"
+    echo -e "  ${BCYAN}3)${NC} Cloudflare tunnel - $(as_step_label "$AS_DO_CLOUDFLARE")"
+    echo -e "  ${BCYAN}4)${NC} Blueprint install - $(as_step_label "$AS_DO_BLUEPRINT")"
+    echo -e "  ${BCYAN}5)${NC} Theme - $(as_step_label "$AS_DO_THEME")"
+    echo -e "  ${BCYAN}6)${NC} Wings install + docker + fix - $(as_step_label "$AS_DO_WINGS")"
     echo ""
 
-    read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" as_cf_token
-    if [ -z "$as_cf_token" ]; then
-        echo -e "${BRED}Token is required. Aborting Auto Setup.${NC}"
-        pause
-        return
-    fi
-
-    echo ""
-    echo -e "${BCYAN}Which theme?${NC}"
-    echo -e "  ${BCYAN}1${NC} Nebula (free)"
-    echo -e "  ${BCYAN}2${NC} Aric ${BYELLOW}(needs a LICENSE + email)${NC}"
-    echo -e "  ${BCYAN}3${NC} None - skip theming"
-    read -rp "$(echo -e ${YELLOW}"Choice [1]: "${NC})" as_theme_choice
-    as_theme_choice="${as_theme_choice:-1}"
-
-    local as_aric_email="" as_aric_license=""
-    if [ "$as_theme_choice" = "2" ]; then
-        read -rp "$(echo -e ${YELLOW}"Aric Email: "${NC})" as_aric_email
-        read -rp "$(echo -e ${YELLOW}"Aric LICENSE: "${NC})" as_aric_license
-        if [ -z "$as_aric_email" ] || [ -z "$as_aric_license" ]; then
-            echo -e "${BRED}Both Email and LICENSE are required for Aric. Aborting Auto Setup.${NC}"
+    local as_cf_token=""
+    if [ "$AS_DO_CLOUDFLARE" = "y" ]; then
+        read -rp "$(echo -e ${YELLOW}"Cloudflare tunnel token: "${NC})" as_cf_token
+        if [ -z "$as_cf_token" ]; then
+            echo -e "${BRED}Token is required for the Cloudflare step. Aborting Auto Setup.${NC}"
             pause
             return
         fi
     fi
 
-    echo ""
-    echo -e "${BGREEN}${BOLD}>>> [1/6] Panel install...${NC}"
-    run_install_silent "$AUTO_SETUP_FQDN"
+    local as_theme_choice="1" as_aric_email="" as_aric_license=""
+    if [ "$AS_DO_THEME" = "y" ]; then
+        echo ""
+        echo -e "${BCYAN}Which theme?${NC}"
+        echo -e "  ${BCYAN}1${NC} Nebula (free)"
+        echo -e "  ${BCYAN}2${NC} Aric ${BYELLOW}(needs a LICENSE + email)${NC}"
+        echo -e "  ${BCYAN}3${NC} None - skip theming"
+        read -rp "$(echo -e ${YELLOW}"Choice [1]: "${NC})" as_theme_choice
+        as_theme_choice="${as_theme_choice:-1}"
 
-    echo ""
-    echo -e "${BGREEN}${BOLD}>>> [2/6] System update...${NC}"
-    apt update
-    apt upgrade -y
+        if [ "$as_theme_choice" = "2" ]; then
+            read -rp "$(echo -e ${YELLOW}"Aric Email: "${NC})" as_aric_email
+            read -rp "$(echo -e ${YELLOW}"Aric LICENSE: "${NC})" as_aric_license
+            if [ -z "$as_aric_email" ] || [ -z "$as_aric_license" ]; then
+                echo -e "${BRED}Both Email and LICENSE are required for Aric. Aborting Auto Setup.${NC}"
+                pause
+                return
+            fi
+        fi
+    fi
 
-    echo ""
-    echo -e "${BGREEN}${BOLD}>>> [3/6] Cloudflare tunnel (background)...${NC}"
-    cloudflare_background_core "$as_cf_token"
+    if [ "$AS_DO_PANEL" = "y" ]; then
+        echo ""
+        echo -e "${BGREEN}${BOLD}>>> Panel install...${NC}"
+        run_install_silent "$AUTO_SETUP_FQDN"
+    else
+        echo -e "${BYELLOW}>>> Panel install skipped.${NC}"
+    fi
 
-    echo ""
-    echo -e "${BGREEN}${BOLD}>>> [4/6] Blueprint install...${NC}"
-    blueprint_install_core
+    if [ "$AS_DO_UPDATE" = "y" ]; then
+        echo ""
+        echo -e "${BGREEN}${BOLD}>>> System update...${NC}"
+        apt update
+        apt upgrade -y
+    else
+        echo -e "${BYELLOW}>>> System update skipped.${NC}"
+    fi
 
-    echo ""
-    case "$as_theme_choice" in
-        2)
-            echo -e "${BGREEN}${BOLD}>>> [5/6] Aric theme...${NC}"
-            theme_aric_install_core "$as_aric_email" "$as_aric_license"
-            ;;
-        3)
-            echo -e "${BGREEN}${BOLD}>>> [5/6] Theme skipped.${NC}"
-            ;;
-        *)
-            echo -e "${BGREEN}${BOLD}>>> [5/6] Nebula theme...${NC}"
-            run_theme_nebula
-            ;;
-    esac
+    if [ "$AS_DO_CLOUDFLARE" = "y" ]; then
+        echo ""
+        echo -e "${BGREEN}${BOLD}>>> Cloudflare tunnel (background)...${NC}"
+        cloudflare_background_core "$as_cf_token"
+    else
+        echo -e "${BYELLOW}>>> Cloudflare tunnel skipped.${NC}"
+    fi
 
-    echo ""
-    echo -e "${BGREEN}${BOLD}>>> [6/6] Wings install + docker + fix...${NC}"
-    wings_install_docker_fix_core
+    if [ "$AS_DO_BLUEPRINT" = "y" ]; then
+        echo ""
+        echo -e "${BGREEN}${BOLD}>>> Blueprint install...${NC}"
+        blueprint_install_core
+    else
+        echo -e "${BYELLOW}>>> Blueprint install skipped.${NC}"
+    fi
+
+    if [ "$AS_DO_THEME" = "y" ]; then
+        echo ""
+        case "$as_theme_choice" in
+            2)
+                echo -e "${BGREEN}${BOLD}>>> Aric theme...${NC}"
+                theme_aric_install_core "$as_aric_email" "$as_aric_license"
+                ;;
+            3)
+                echo -e "${BGREEN}${BOLD}>>> Theme skipped (chose None).${NC}"
+                ;;
+            *)
+                echo -e "${BGREEN}${BOLD}>>> Nebula theme...${NC}"
+                run_theme_nebula
+                ;;
+        esac
+    else
+        echo -e "${BYELLOW}>>> Theme step skipped.${NC}"
+    fi
+
+    if [ "$AS_DO_WINGS" = "y" ]; then
+        echo ""
+        echo -e "${BGREEN}${BOLD}>>> Wings install + docker + fix...${NC}"
+        wings_install_docker_fix_core
+    else
+        echo -e "${BYELLOW}>>> Wings install + docker + fix skipped.${NC}"
+    fi
 
     echo ""
     echo -e "${BGREEN}${BOLD}>>> Auto Setup complete!${NC}"
@@ -2757,6 +2905,7 @@ run_auto_setup() {
 
 # ============================================================
 # CREDITS
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 show_credits() {
     banner
@@ -2770,6 +2919,7 @@ show_credits() {
 
 # ============================================================
 # MAIN MENU
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
 # ============================================================
 show_menu() {
     banner
@@ -2803,8 +2953,87 @@ show_menu() {
     esac
 }
 
+# ============================================================
+# ACCESS VERIFICATION - requires a valid mashosting.bond login
+# ============================================================
+# (c) ItzMASGaming - unauthorized copies/reuploads of this script violate copyright.
+# Built against a standard Laravel/Pterodactyl login form (CSRF token +
+# email/password fields). NOTE: not tested against the live site since it
+# was returning a 502 at the time this was written - if the field names
+# or response shape differ once the panel is back up, this may need
+# adjusting (the csrf_token / authed_check patterns below are the parts
+# most likely to need a tweak).
+MAS_LOGIN_URL="https://mashosting.bond/auth/login"
+MAS_HOME_URL="https://mashosting.bond/"
+
+require_mas_login() {
+    banner
+    echo -e "${BCYAN}${BOLD}▸ MAS Gui Access Verification${NC}"
+    echo -e "${BCYAN}──────────────────────────────${NC}"
+    echo ""
+    echo -e "${YELLOW}Sign in with your mashosting.bond account to continue.${NC}"
+    echo ""
+
+    local attempts=0
+    local max_attempts=3
+
+    while [ "$attempts" -lt "$max_attempts" ]; do
+        read -rp "$(echo -e ${YELLOW}"Email: "${NC})" mas_login_email
+        read -rsp "$(echo -e ${YELLOW}"Password: "${NC})" mas_login_pass
+        echo ""
+
+        local cookie_jar
+        cookie_jar=$(mktemp)
+
+        local login_page
+        login_page=$(curl -sL -c "$cookie_jar" "$MAS_LOGIN_URL")
+
+        if [ -z "$login_page" ]; then
+            echo -e "${BRED}Could not reach ${MAS_LOGIN_URL} (site may be down). Cannot verify access right now.${NC}"
+            rm -f "$cookie_jar"
+            attempts=$((attempts+1))
+            continue
+        fi
+
+        local csrf_token
+        csrf_token=$(echo "$login_page" | grep -oE 'name="_token"[^>]*value="[^"]+"' | sed -E 's/.*value="([^"]+)".*/\1/' | head -1)
+
+        if [ -z "$csrf_token" ]; then
+            echo -e "${BRED}Could not read a login form from the site. Cannot verify access right now.${NC}"
+            rm -f "$cookie_jar"
+            attempts=$((attempts+1))
+            continue
+        fi
+
+        curl -s -o /dev/null -c "$cookie_jar" -b "$cookie_jar" \
+            --data-urlencode "_token=$csrf_token" \
+            --data-urlencode "email=$mas_login_email" \
+            --data-urlencode "password=$mas_login_pass" \
+            "$MAS_LOGIN_URL"
+
+        local authed_check
+        authed_check=$(curl -s -b "$cookie_jar" -L "$MAS_HOME_URL")
+        rm -f "$cookie_jar"
+        unset mas_login_pass
+
+        if echo "$authed_check" | grep -qi "logout\|dashboard\|Server List"; then
+            echo -e "${BGREEN}>>> Access verified. Welcome.${NC}"
+            sleep 1
+            return 0
+        fi
+
+        attempts=$((attempts+1))
+        echo -e "${BRED}Login failed. (${attempts}/${max_attempts})${NC}"
+    done
+
+    echo ""
+    echo -e "${BRED}${BOLD}Access denied - could not verify your mashosting.bond account.${NC}"
+    exit 1
+}
+
 check_root
 fix_locale
+require_mas_login
 while true; do
     show_menu
 done
