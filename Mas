@@ -1,6 +1,6 @@
 #!/bin/bash
 # MAS Gui - loader
-# Run with: bash <(curl -s <your-raw-url>)
+# Run with: bash <(curl -sL itzmasgaming.github.io/gui/Mas)
 
 k1a="adc6cb55ef27f46ee249d828023d706a"
 k1b="50785360289c1d847c863620e59e1ba5"
