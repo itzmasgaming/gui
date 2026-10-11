@@ -1,4 +1,8 @@
 #!/bin/bash
+_p="x
+" #
+case "$_p" in *$'\r'*) _c=$(curl -fsSL "${MAS_SELF_URL:-https://itzmasgaming.github.io/gui/Mas}" | tr -d '\r'); [ -n "$_c" ] && exec bash -c "$_c" mas "$@"; echo "Windows line endings (CRLF) detected and the clean reload failed. Save the file with LF endings."; exit 1 ;; esac #
+# NOTE: the 3 lines above are an auto-fix for CRLF (Windows) line endings. Keep them as the first lines.
 # ============================================================
 #  Main Menu (front layer)  ->  Hosting Setup / Coming Soon / Exit
 #  This wrapper does NOT contain or modify the MAS GUI script.
@@ -33,7 +37,7 @@ run_pterodactyl() {
     echo -e "  ${YELLOW}⏳ Loading Pterodactyl tools...${NC}"
     echo -e "  ${CYAN}This may take a few moments while the script is being decoded.${NC}"
     echo
-    bash <(curl -fsSL "$PTERO_URL") || {
+    bash <(curl -fsSL "$PTERO_URL" | tr -d '\r') || {
         echo -e "\n  ${RED}Could not load the Pterodactyl script.${NC}"
         pause
     }
