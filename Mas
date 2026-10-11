@@ -1,6 +1,6 @@
 #!/bin/bash
 # MAS Gui - loader (outer wrapper, custom additional layers)
-# Run with: bash <(curl -s <your-raw-url>)
+# Run with: bash <(curl -s <https://raw.githubusercontent.com/itzmasgaming/gui/refs/heads/main/Mas>)
 
 c200a="669d7ae1bf4f6138"
 c200b="208f3980cc3ccec0"
