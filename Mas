@@ -4,19 +4,27 @@ _p="x
 case "$_p" in *$'\r'*) _c=$(curl -fsSL "${MAS_SELF_URL:-https://itzmasgaming.github.io/gui/Mas}" | tr -d '\r'); [ -n "$_c" ] && exec bash -c "$_c" mas "$@"; echo "Windows line endings (CRLF) detected and the clean reload failed. Save the file with LF endings."; exit 1 ;; esac #
 # NOTE: the 3 lines above are an auto-fix for CRLF (Windows) line endings. Keep them as the first lines.
 # ============================================================
-#  MAS GUI - Main Menu (front layer)  ->  Hosting Setup / Coming Soon / Exit
-#  This wrapper does NOT contain or modify the Pterodactyl script.
-#  It only launches it, exactly as published, when you pick Pterodactyl.
+#  MAS GUI - Main Menu (front layer)
+#  Loads each panel's own "everything" toolkit (Mas_<first5>).
+#  File   : Mas_Menu
+#  Author : ItzMASGaming   (https://mashosting.bond)
+# ============================================================
+#  LICENSE & COPYRIGHT NOTICE
+#  ------------------------------------------------------------
+#  Copyright (c) 2024-2026 ItzMASGaming. All rights reserved.
+#  Unauthorized use, reproduction, or distribution of this
+#  file or the panel toolkits it launches is prohibited.
+#  ------------------------------------------------------------
 # ============================================================
 
-MENU_VERSION="1.0"
+MENU_VERSION="3.0"
 
-# Where the existing Pterodactyl script is loaded from
-PTERO_URL="https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas_Ptero"
+# Where each Mas_<first5> toolkit is loaded from.
+BASE_URL="${MAS_BASE_URL:-https://raw.githubusercontent.com/itzmasgaming/gui/main}"
 
 # ---------------- COLORS (aqua theme) ----------------
 AQUA='\033[1;96m'      # bright aqua - borders, numbers, prompt
-AQUA2='\033[0;36m'     # soft aqua   - subtitles
+AQUA2='\033[0;36m'     # soft aqua   - subtitles, commands
 WHITE='\033[1;37m'
 YELLOW='\033[1;93m'
 RED='\033[1;91m'
@@ -24,6 +32,9 @@ GREEN='\033[1;92m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# ============================================================
+#  UI helpers
+# ============================================================
 pause() {
     echo
     read -rp "$(echo -e "${YELLOW}Press ENTER to return to the menu...${NC}")" _
@@ -33,7 +44,7 @@ pause() {
 banner() {
     clear
     local width=48 line text left right
-    line=$(printf '━%.0s' $(seq 1 "$width"))
+    line=$(printf '\u2501%.0s' $(seq 1 "$width"))
 
     center() {
         text="$1"
@@ -44,100 +55,154 @@ banner() {
         printf '%*s%s%*s' "$left" "" "$text" "$right" ""
     }
 
-    echo -e "${AQUA}${BOLD}┏${line}┓${NC}"
-    echo -e "${AQUA}${BOLD}┃${NC}$(center "")${AQUA}${BOLD}┃${NC}"
-    echo -e "${AQUA}${BOLD}┃${NC}${WHITE}${BOLD}$(center "◆ MAS GUI ◆")${NC}${AQUA}${BOLD}┃${NC}"
-    echo -e "${AQUA}${BOLD}┃${NC}${AQUA2}$(center "${1:-Hosting Toolkit}")${NC}${AQUA}${BOLD}┃${NC}"
-    echo -e "${AQUA}${BOLD}┃${NC}${WHITE}$(center "v${MENU_VERSION}")${NC}${AQUA}${BOLD}┃${NC}"
-    echo -e "${AQUA}${BOLD}┃${NC}$(center "")${AQUA}${BOLD}┃${NC}"
-    echo -e "${AQUA}${BOLD}┗${line}┛${NC}"
+    echo -e "${AQUA}${BOLD}\u250f${line}\u2513${NC}"
+    echo -e "${AQUA}${BOLD}\u2503${NC}$(center "")${AQUA}${BOLD}\u2503${NC}"
+    echo -e "${AQUA}${BOLD}\u2503${NC}${WHITE}${BOLD}$(center "\u25c6 MAS GUI \u25c6")${NC}${AQUA}${BOLD}\u2503${NC}"
+    echo -e "${AQUA}${BOLD}\u2503${NC}${AQUA2}$(center "${1:-Hosting Toolkit}")${NC}${AQUA}${BOLD}\u2503${NC}"
+    echo -e "${AQUA}${BOLD}\u2503${NC}${WHITE}$(center "v${MENU_VERSION}")${NC}${AQUA}${BOLD}\u2503${NC}"
+    echo -e "${AQUA}${BOLD}\u2503${NC}$(center "")${AQUA}${BOLD}\u2503${NC}"
+    echo -e "${AQUA}${BOLD}\u2517${line}\u251b${NC}"
     echo
 }
 
-# Prints one menu line. Usage: opt <key> <emoji+label> [tag]
-opt() {
-    local key="$1" label="$2" tag="$3"
-    if [ -n "$tag" ]; then
-        echo -e "  ❯ ${AQUA}${key}${NC} ${label} ${YELLOW}${tag}${NC}"
-    else
-        echo -e "  ❯ ${AQUA}${key}${NC} ${label}"
-    fi
-}
+# One menu line. Usage: opt <key> <emoji+label>
+opt() { echo -e "  \u276f ${AQUA}$1${NC} $2"; }
 
 ask() { read -rp "$(echo -e "${AQUA}${BOLD}Select an option: ${NC}")" "$1"; }
 
 invalid() { echo -e "\n${RED}Invalid option.${NC}"; sleep 1; }
 
-# ------------------------------------------------------------
-#  Panel launchers
-# ------------------------------------------------------------
-run_pterodactyl() {
-    # Runs the Pterodactyl script as a separate process; when it exits
-    # you land back in this menu.
-    echo
-    echo -e "  ${YELLOW}⏳ Loading Pterodactyl tools...${NC}"
-    echo -e "  ${AQUA2}This may take a few moments while the script is being decoded.${NC}"
-    echo
-    bash <(curl -fsSL "$PTERO_URL" | tr -d '\r') || {
-        echo -e "\n  ${RED}Could not load the Pterodactyl script.${NC}"
-        pause
-    }
-}
-
-# Template for adding another panel. Copy this, rename it, and fill in
-# the real actions for that panel (install, update, uninstall, etc.).
-panel_template() {
-    banner "$1"
-    echo -e "  ${YELLOW}$1 tools are not available yet.${NC}"
-    pause
-}
-
-run_pelican()   { panel_template "Pelican Panel"; }
-run_jexactyl()  { panel_template "Jexactyl"; }
-run_reviactyl() { panel_template "Reviactyl"; }
-run_convoy()    { panel_template "Convoy"; }
-run_ctrlpanel() { panel_template "CtrlPanel"; }
-
-# ------------------------------------------------------------
-#  Menus
-# ------------------------------------------------------------
-hosting_menu() {
+# Generic menu. Usage: menu_loop "Subtitle" "info text (or empty)" "Label::function" ...
+menu_loop() {
+    local title="$1" info="$2"; shift 2
+    local acts=("$@") i a c fn
     while true; do
-        banner "Hosting Setup"
-        opt 1 "🗂️  Pterodactyl"
-        opt 2 "🐦  Pelican Panel" "[Soon]"
-        opt 3 "⚡  Jexactyl"      "[Soon]"
-        opt 4 "🌐  Reviactyl"     "[Soon]"
-        opt 5 "🚚  Convoy"        "[Soon]"
-        opt 6 "💳  CtrlPanel"     "[Soon]"
-        echo -e "  ❯ ${RED}0${NC} ↩️  Back"
+        banner "$title"
+        [ -n "$info" ] && echo -e "$info\n"
+        i=1
+        for a in "${acts[@]}"; do opt "$i" "${a%%::*}"; i=$((i+1)); done
+        echo -e "  \u276f ${RED}0${NC} \u21a9\ufe0f  Back"
         echo
         ask c
-        case "$c" in
-            1) run_pterodactyl ;;
-            2) run_pelican ;;
-            3) run_jexactyl ;;
-            4) run_reviactyl ;;
-            5) run_convoy ;;
-            6) run_ctrlpanel ;;
-            0) return ;;
-            *) invalid ;;
-        esac
+        if [ "$c" = "0" ]; then return; fi
+        if [[ "$c" =~ ^[0-9]+$ ]] && (( c >= 1 && c <= ${#acts[@]} )); then
+            fn="${acts[$((c-1))]##*::}"
+            "$fn"
+        else
+            invalid
+        fi
     done
+}
+
+# ============================================================
+#  Core helpers
+# ============================================================
+server_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
+
+need_root() {
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        echo -e "\n  ${RED}This needs root.${NC} Run ${WHITE}sudo -i${NC}, then start the menu again."
+        pause; return 1
+    fi
+}
+
+# ============================================================
+#  Panel launcher
+#  Prefers a local Mas_<first5> file next to this menu,
+#  otherwise fetches it from BASE_URL.
+# ============================================================
+run_panel() {
+    local file="$1" name="$2"
+    echo
+    echo -e "  ${YELLOW}\u23f3 Loading ${name} tools...${NC}"
+    echo -e "  ${AQUA2}This may take a few moments while the toolkit is being decoded.${NC}"
+    echo
+
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+
+    if [ -n "$self_dir" ] && [ -f "$self_dir/$file" ]; then
+        echo -e "  ${AQUA2}Using local file: $self_dir/$file${NC}"
+        bash "$self_dir/$file" || { echo -e "\n  ${RED}Could not run $file.${NC}"; pause; }
+    else
+        echo -e "  ${AQUA2}Fetching: $BASE_URL/$file${NC}"
+        bash <(curl -fsSL "$BASE_URL/$file" | tr -d '\r') || {
+            echo -e "\n  ${RED}Could not load $file from the server.${NC}"
+            pause
+        }
+    fi
+}
+
+# Thin wrappers so each menu entry is self-documenting.
+run_pterodactyl() { run_panel "Mas_Ptero" "Pterodactyl"; }
+run_pelican()     { run_panel "Mas_Pelic" "Pelican"; }
+run_pufferpanel() { run_panel "Mas_Puffe" "PufferPanel"; }
+run_crafty()      { run_panel "Mas_Craft" "Crafty Controller"; }
+run_mcsmanager()  { run_panel "Mas_MCSMa" "MCSManager"; }
+run_jexactyl()    { run_panel "Mas_Jexac" "Jexactyl"; }
+run_reviactyl()   { run_panel "Mas_Revia" "Reviactyl"; }
+run_hestia()      { run_panel "Mas_Hesti" "HestiaCP"; }
+run_webmin()      { run_panel "Mas_Webmi" "Webmin"; }
+run_coolify()     { run_panel "Mas_Cooli" "Coolify"; }
+run_dokploy()     { run_panel "Mas_Dokpl" "Dokploy"; }
+run_portainer()   { run_panel "Mas_Porta" "Portainer"; }
+run_convoy()      { run_panel "Mas_Convo" "Convoy"; }
+run_ctrlpanel()   { run_panel "Mas_CtrlP" "CtrlPanel"; }
+
+# ============================================================
+#  Menus
+# ============================================================
+game_menu() {
+    menu_loop "Game Server Panels" "" \
+        "\ud83d\uddc2\ufe0f   Pterodactyl::run_pterodactyl" \
+        "\ud83d\udc26  Pelican Panel::run_pelican" \
+        "\ud83d\udc21  PufferPanel::run_pufferpanel" \
+        "\ud83d\udee0\ufe0f   Crafty Controller::run_crafty" \
+        "\u26cf\ufe0f   MCSManager::run_mcsmanager" \
+        "\u26a1  Jexactyl::run_jexactyl" \
+        "\ud83c\udf10  Reviactyl::run_reviactyl"
+}
+
+web_menu() {
+    menu_loop "Web Hosting Panels" "" \
+        "\ud83c\udfe0  HestiaCP::run_hestia" \
+        "\ud83e\uddf0  Webmin::run_webmin"
+}
+
+app_menu() {
+    menu_loop "App & Container Panels" "" \
+        "\ud83d\ude80  Coolify::run_coolify" \
+        "\ud83d\udce6  Dokploy::run_dokploy" \
+        "\ud83d\udc33  Portainer::run_portainer"
+}
+
+vps_menu() {
+    menu_loop "VPS & Billing Panels" "" \
+        "\ud83d\ude9a  Convoy::run_convoy" \
+        "\ud83d\udcb3  CtrlPanel::run_ctrlpanel"
+}
+
+hosting_menu() {
+    menu_loop "Hosting Setup" "" \
+        "\ud83c\udfae  Game Server Panels::game_menu" \
+        "\ud83c\udf0d  Web Hosting Panels::web_menu" \
+        "\ud83d\udce6  App & Container Panels::app_menu" \
+        "\ud83d\udda5\ufe0f   VPS & Billing Panels::vps_menu"
 }
 
 coming_soon() {
     banner "Coming Soon"
-    echo -e "  ${YELLOW}🚧 New tools are on the way. Stay tuned!${NC}"
+    echo -e "  ${YELLOW}\ud83d\udea7 New tools are on the way. Stay tuned!${NC}"
     pause
 }
 
 main_menu() {
+    local c
     while true; do
         banner "Main Menu"
-        opt 1 "🖥️  Hosting Setup"
-        opt 2 "🚧  Coming Soon"
-        echo -e "  ❯ ${RED}0${NC} ✖️  Exit"
+        opt 1 "\ud83d\udda5\ufe0f  Hosting Setup"
+        opt 2 "\ud83d\udea7  Coming Soon"
+        echo -e "  \u276f ${RED}0${NC} \u2716\ufe0f  Exit"
         echo
         ask c
         case "$c" in
@@ -149,4 +214,4 @@ main_menu() {
     done
 }
 
-main_menu
+[ -z "$MAS_NO_RUN" ] && main_menu
