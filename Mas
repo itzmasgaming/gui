@@ -4,38 +4,79 @@ _p="x
 case "$_p" in *$'\r'*) _c=$(curl -fsSL "${MAS_SELF_URL:-https://itzmasgaming.github.io/gui/Mas}" | tr -d '\r'); [ -n "$_c" ] && exec bash -c "$_c" mas "$@"; echo "Windows line endings (CRLF) detected and the clean reload failed. Save the file with LF endings."; exit 1 ;; esac #
 # NOTE: the 3 lines above are an auto-fix for CRLF (Windows) line endings. Keep them as the first lines.
 # ============================================================
-#  Main Menu (front layer)  ->  Hosting Setup / Coming Soon / Exit
-#  This wrapper does NOT contain or modify the MAS GUI script.
+#  MAS GUI - Main Menu (front layer)  ->  Hosting Setup / Coming Soon / Exit
+#  This wrapper does NOT contain or modify the Pterodactyl script.
 #  It only launches it, exactly as published, when you pick Pterodactyl.
 # ============================================================
 
-# Where the existing MAS GUI (Pterodactyl) script is loaded from
+MENU_VERSION="1.0"
+
+# Where the existing Pterodactyl script is loaded from
 PTERO_URL="https://raw.githubusercontent.com/itzmasgaming/gui/main/Mas_Ptero"
 
-RED='\033[0;31m'; BRED='\033[1;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+# ---------------- COLORS (aqua theme) ----------------
+AQUA='\033[1;96m'      # bright aqua - borders, numbers, prompt
+AQUA2='\033[0;36m'     # soft aqua   - subtitles
+WHITE='\033[1;37m'
+YELLOW='\033[1;93m'
+RED='\033[1;91m'
+GREEN='\033[1;92m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-pause() { echo; read -rp "  Press Enter to continue..." _; }
+pause() {
+    echo
+    read -rp "$(echo -e "${YELLOW}Press ENTER to return to the menu...${NC}")" _
+}
 
-header() {
+# Boxed banner. Usage: banner "Subtitle"
+banner() {
     clear
-    echo -e "${CYAN}============================================${NC}"
-    echo -e "${BOLD}   $1${NC}"
-    echo -e "${CYAN}============================================${NC}"
+    local width=48 line text left right
+    line=$(printf '━%.0s' $(seq 1 "$width"))
+
+    center() {
+        text="$1"
+        left=$(( (width - ${#text}) / 2 ))
+        right=$(( width - ${#text} - left ))
+        (( left < 0 )) && left=0
+        (( right < 0 )) && right=0
+        printf '%*s%s%*s' "$left" "" "$text" "$right" ""
+    }
+
+    echo -e "${AQUA}${BOLD}┏${line}┓${NC}"
+    echo -e "${AQUA}${BOLD}┃${NC}$(center "")${AQUA}${BOLD}┃${NC}"
+    echo -e "${AQUA}${BOLD}┃${NC}${WHITE}${BOLD}$(center "◆ MAS GUI ◆")${NC}${AQUA}${BOLD}┃${NC}"
+    echo -e "${AQUA}${BOLD}┃${NC}${AQUA2}$(center "${1:-Hosting Toolkit}")${NC}${AQUA}${BOLD}┃${NC}"
+    echo -e "${AQUA}${BOLD}┃${NC}${WHITE}$(center "v${MENU_VERSION}")${NC}${AQUA}${BOLD}┃${NC}"
+    echo -e "${AQUA}${BOLD}┃${NC}$(center "")${AQUA}${BOLD}┃${NC}"
+    echo -e "${AQUA}${BOLD}┗${line}┛${NC}"
     echo
 }
 
-invalid() { echo -e "\n  ${RED}Invalid option.${NC}"; sleep 1; }
+# Prints one menu line. Usage: opt <key> <emoji+label> [tag]
+opt() {
+    local key="$1" label="$2" tag="$3"
+    if [ -n "$tag" ]; then
+        echo -e "  ❯ ${AQUA}${key}${NC} ${label} ${YELLOW}${tag}${NC}"
+    else
+        echo -e "  ❯ ${AQUA}${key}${NC} ${label}"
+    fi
+}
+
+ask() { read -rp "$(echo -e "${AQUA}${BOLD}Select an option: ${NC}")" "$1"; }
+
+invalid() { echo -e "\n${RED}Invalid option.${NC}"; sleep 1; }
 
 # ------------------------------------------------------------
 #  Panel launchers
 # ------------------------------------------------------------
 run_pterodactyl() {
-    # Runs the existing MAS GUI as a separate process; when it exits
+    # Runs the Pterodactyl script as a separate process; when it exits
     # you land back in this menu.
     echo
     echo -e "  ${YELLOW}⏳ Loading Pterodactyl tools...${NC}"
-    echo -e "  ${CYAN}This may take a few moments while the script is being decoded.${NC}"
+    echo -e "  ${AQUA2}This may take a few moments while the script is being decoded.${NC}"
     echo
     bash <(curl -fsSL "$PTERO_URL" | tr -d '\r') || {
         echo -e "\n  ${RED}Could not load the Pterodactyl script.${NC}"
@@ -46,9 +87,8 @@ run_pterodactyl() {
 # Template for adding another panel. Copy this, rename it, and fill in
 # the real actions for that panel (install, update, uninstall, etc.).
 panel_template() {
-    local name="$1"
-    header "$name"
-    echo -e "  ${YELLOW}$name tools are not wired up yet.${NC}"
+    banner "$1"
+    echo -e "  ${YELLOW}$1 tools are not available yet.${NC}"
     pause
 }
 
@@ -56,23 +96,23 @@ run_pelican()   { panel_template "Pelican Panel"; }
 run_jexactyl()  { panel_template "Jexactyl"; }
 run_reviactyl() { panel_template "Reviactyl"; }
 run_convoy()    { panel_template "Convoy"; }
-run_ctrlpanel() { panel_template "CtrlPanel (billing)"; }
+run_ctrlpanel() { panel_template "CtrlPanel"; }
 
 # ------------------------------------------------------------
 #  Menus
 # ------------------------------------------------------------
 hosting_menu() {
     while true; do
-        header "Hosting Setup - Choose a Panel"
-        echo -e "  ❯ ${BRED}1${NC} Pterodactyl"
-        echo -e "  ❯ ${BRED}2${NC} Pelican Panel      ${YELLOW}(soon)${NC}"
-        echo -e "  ❯ ${BRED}3${NC} Jexactyl           ${YELLOW}(soon)${NC}"
-        echo -e "  ❯ ${BRED}4${NC} Reviactyl          ${YELLOW}(soon)${NC}"
-        echo -e "  ❯ ${BRED}5${NC} Convoy             ${YELLOW}(soon)${NC}"
-        echo -e "  ❯ ${BRED}6${NC} CtrlPanel          ${YELLOW}(soon)${NC}"
-        echo -e "  ❯ ${BRED}0${NC} Back"
+        banner "Hosting Setup"
+        opt 1 "🗂️  Pterodactyl"
+        opt 2 "🐦  Pelican Panel" "[Soon]"
+        opt 3 "⚡  Jexactyl"      "[Soon]"
+        opt 4 "🌐  Reviactyl"     "[Soon]"
+        opt 5 "🚚  Convoy"        "[Soon]"
+        opt 6 "💳  CtrlPanel"     "[Soon]"
+        echo -e "  ❯ ${RED}0${NC} ↩️  Back"
         echo
-        read -rp "  Select an option: " c
+        ask c
         case "$c" in
             1) run_pterodactyl ;;
             2) run_pelican ;;
@@ -87,23 +127,23 @@ hosting_menu() {
 }
 
 coming_soon() {
-    header "Coming Soon"
-    echo -e "  ${YELLOW}New tools are on the way. Stay tuned!${NC}"
+    banner "Coming Soon"
+    echo -e "  ${YELLOW}🚧 New tools are on the way. Stay tuned!${NC}"
     pause
 }
 
 main_menu() {
     while true; do
-        header "MAS GUI - Main Menu"
-        echo -e "  ❯ ${BRED}1${NC} Hosting Setup"
-        echo -e "  ❯ ${BRED}2${NC} Coming Soon"
-        echo -e "  ❯ ${BRED}0${NC} Exit"
+        banner "Main Menu"
+        opt 1 "🖥️  Hosting Setup"
+        opt 2 "🚧  Coming Soon"
+        echo -e "  ❯ ${RED}0${NC} ✖️  Exit"
         echo
-        read -rp "  Select an option: " c
+        ask c
         case "$c" in
             1) hosting_menu ;;
             2) coming_soon ;;
-            0) echo -e "\n  ${GREEN}Goodbye!${NC}\n"; exit 0 ;;
+            0) echo -e "\n${GREEN}Goodbye!${NC}\n"; exit 0 ;;
             *) invalid ;;
         esac
     done
