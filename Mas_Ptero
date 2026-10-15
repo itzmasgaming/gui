@@ -27,7 +27,6 @@ _spin &
 _spid=$!
 trap 'kill $_spid 2>/dev/null' EXIT
 
-
 _b(){ printf '%s' "$1" | base64 -d; }
 _O=$(_b 'b3BlbnNzbA==')
 _F=$(_b 'ZW5j')
@@ -175,6 +174,7 @@ _n=22
 for ((i=_n-1; i>=1; i--)); do
   _blob="$(printf %s "$_blob" | tr "${_rots[i]}" "$_AL" | base64 -d | _o "${_keys[i]}")"
 done
+
 _blob="$(printf %s "$_blob" | tr "${_rots[0]}" "$_AL" | base64 -d | _o "${_keys[0]}" | gunzip; printf '\036\037')"
 _blob="${_blob%$'\036\037'}"
 
