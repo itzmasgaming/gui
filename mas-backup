@@ -1,3 +1,35 @@
+#!/bin/bash
+# MAS GUI - Backup/Restore installer
+# Usage: bash <(curl -sL itzmasgaming.github.io/gui/mas-backup)
+if [ "$(id -u)" -ne 0 ]; then echo "Run as root."; exit 1; fi
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+APP=/opt/masgui
+PORT=8080
+mkdir -p "$APP"
+
+echo "[1/5] Installing dependencies (broken repos are ignored)..."
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y python3 python3-venv python3-pip curl >/dev/null 2>&1 || \
+    apt-get install -y python3 python3-venv python3-pip curl --allow-unauthenticated >/dev/null 2>&1 || true
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y python3 python3-pip curl >/dev/null 2>&1 || true
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y python3 python3-pip curl >/dev/null 2>&1 || true
+fi
+
+echo "[2/5] Setting up Python environment..."
+if [ ! -x "$APP/venv/bin/pip" ]; then
+  rm -rf "$APP/venv"
+  python3 -m venv "$APP/venv" || { echo "ERROR: python3-venv missing. Run: apt install -y python3-venv"; exit 1; }
+fi
+"$APP/venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+"$APP/venv/bin/pip" install -q flask requests requests_toolbelt
+
+echo "[3/5] Writing app..."
+cat > "$APP/masgui.py" <<'PYEOF'
 #!/usr/bin/env python3
 """
 MAS GUI - Backup to GoFile / Restore from GoFile (VPS1 -> VPS2, or VPS1 -> VPS1 after reset)
@@ -312,3 +344,43 @@ if __name__ == "__main__":
         print("WARNING: not running as root - some files can't be read/restored.")
     print(f"\nMAS GUI on http://{a.host}:{a.port}   login: admin / {cfg['password']}\n")
     app.run(host=a.host, port=a.port, threaded=True)
+PYEOF
+
+echo "[4/5] Opening firewall port $PORT..."
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow $PORT/tcp >/dev/null 2>&1 || true; fi
+if command -v iptables >/dev/null 2>&1; then iptables -C INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null || true; fi
+
+echo "[5/5] Starting MAS GUI..."
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+cat > /etc/systemd/system/masgui.service <<UNIT
+[Unit]
+Description=MAS GUI Backup
+After=network.target
+
+[Service]
+ExecStart=$APP/venv/bin/python $APP/masgui.py --port $PORT
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable masgui >/dev/null 2>&1
+  systemctl restart masgui
+  sleep 3
+  PASS=$(python3 -c "import json;print(json.load(open('/root/.masgui/config.json'))['password'])")
+  IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
+  echo
+  echo "=============================================="
+  echo " MAS GUI is running (auto-starts on reboot)"
+  echo " URL:      http://$IP:$PORT"
+  echo " Login:    admin"
+  echo " Password: $PASS"
+  echo "=============================================="
+  echo " Open port $PORT in your firewall/panel if it doesn't load."
+  echo " Stop:  systemctl stop masgui   |  Logs: journalctl -u masgui -f"
+else
+  echo "No systemd found, running in foreground (Ctrl+C to stop)..."
+  exec "$APP/venv/bin/python" "$APP/masgui.py" --port $PORT
+fi
