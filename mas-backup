@@ -80,6 +80,24 @@ do_backup() {
   pause
 }
 
+# Try to fetch a GoFile link into a file. Uses saved account token if present, else guest.
+fetch_gofile() {
+  local code=$1 out=$2 token meta furl wt st
+  if [ -s "$TOKEN_FILE" ]; then token=$(cat "$TOKEN_FILE")
+  else token=$(curl -s -X POST https://api.gofile.io/accounts | jq -r .data.token 2>/dev/null); fi
+  [ -z "$token" -o "$token" = null ] && return 1
+  wt=$(curl -s https://gofile.io/dist/js/global.js | grep -oE 'wt["]?\s*[:=]\s*"[A-Za-z0-9]+"' | head -1 | grep -oE '"[A-Za-z0-9]+"' | tr -d '"')
+  [ -z "$wt" ] && wt=4fd6sg89d7s6
+  meta=$(curl -s -H "Authorization: Bearer $token" "https://api.gofile.io/contents/$code?wt=$wt")
+  st=$(echo "$meta" | jq -r .status 2>/dev/null)
+  if [ "$st" != ok ]; then echo -e "  GoFile says: ${st:-no response}"; return 1; fi
+  furl=$(echo "$meta" | jq -r '[.data.children[] | select(.type=="file")][0].link')
+  [ -z "$furl" -o "$furl" = null ] && { echo "  No file found at this link."; return 1; }
+  echo -e "${Y}Downloading...${N}"
+  curl -# -L -H "Cookie: accountToken=$token" "$furl" -o "$out" || return 1
+  tar -tzf "$out" >/dev/null 2>&1 || { echo "  Downloaded file is not a valid backup."; rm -f "$out"; return 1; }
+}
+
 # ---- 2) IMPORT BACKUP <- GoFile ----
 do_import() {
   banner
@@ -100,18 +118,24 @@ do_import() {
   echo -e "${R}This will overwrite files in $TARGET.${N}"
   read -rp "Continue? [y/N]: " ok; [[ "$ok" =~ ^[Yy]$ ]] || return
 
-  echo -e "\n${Y}[1/2] Downloading...${N}"
-  TOKEN=$(curl -s -X POST https://api.gofile.io/accounts | jq -r .data.token)
-  [ -z "$TOKEN" -o "$TOKEN" = null ] && { echo -e "${R}Could not get GoFile token.${N}"; pause; return; }
-  META=$(curl -s -H "Authorization: Bearer $TOKEN" "https://api.gofile.io/contents/$CODE?wt=4fd6sg89d7s6")
-  if [ "$(echo "$META" | jq -r .status)" != "ok" ]; then
-    echo -e "${R}GoFile error (link expired/deleted?):${N}"; echo "$META" | head -c 300; echo; pause; return
+  IN="$DIR/restore.tar.gz"; KEEP=0
+  echo -e "\n${Y}[1/2] Getting backup from GoFile...${N}"
+  if ! fetch_gofile "$CODE" "$IN"; then
+    echo -e "\n${R}GoFile blocked the scripted download (API now needs a Premium token).${N}"
+    echo "  1) Paste my GoFile account token (gofile.io/myprofile)"
+    echo "  2) Use a backup .tar.gz already on this VPS (path)"
+    echo "  0) Back"
+    read -rp "Choose: " o
+    case $o in
+      1) read -rp "Token: " t; [ -z "$t" ] && return
+         echo "$t" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+         fetch_gofile "$CODE" "$IN" || { echo -e "${R}Still failed.${N}"; pause; return; } ;;
+      2) read -rp "Path to .tar.gz: " p
+         [ -f "$p" ] || { echo -e "${R}File not found.${N}"; pause; return; }
+         IN="$p"; KEEP=1 ;;
+      *) return ;;
+    esac
   fi
-  FURL=$(echo "$META" | jq -r '[.data.children[] | select(.type=="file")][0].link')
-  [ -z "$FURL" -o "$FURL" = null ] && { echo -e "${R}No file found at this link.${N}"; pause; return; }
-  IN="$DIR/restore.tar.gz"
-  curl -# -L -H "Cookie: accountToken=$TOKEN" "$FURL" -o "$IN"
-  tar -tzf "$IN" >/dev/null 2>&1 || { echo -e "${R}Downloaded file is not a valid backup.${N}"; rm -f "$IN"; pause; return; }
 
   echo -e "\n${Y}[2/2] Restoring to $TARGET ...${N}"
   mkdir -p "$TARGET"
@@ -123,7 +147,7 @@ do_import() {
   fi
   tar -xzpf "$IN" -C "$TARGET" --numeric-owner "${SKIP[@]}" 2>"$DIR/tar.err"
   rc=$?
-  rm -f "$IN"
+  [ $KEEP -eq 0 ] && rm -f "$IN"
   [ $rc -gt 1 ] && { echo -e "${R}Restore had errors:${N}"; tail -5 "$DIR/tar.err"; } || echo -e "${G}DONE! Files restored.${N}"
   echo "Tip: restart your services (nginx, docker...) or reboot."
   pause
