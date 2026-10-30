@@ -13,7 +13,7 @@ mkdir -p "$DIR"; touch "$HIST"
 VER="v4.4"
 T='\033[38;5;115m'; G='\033[1;32m'; R='\033[1;31m'; C='\033[1;36m'; Y='\033[1;33m'
 W='\033[1;37m'; D='\033[2m'; N='\033[0m'
-BW=52   # box width
+BW=50   # box width
 
 # ---- dependencies ----
 need() {
@@ -47,12 +47,12 @@ banner() {   # $1 = sub title
   echo
 }
 
-opt()  { echo -e "  ${T}❯${N} ${G}$1${N} $2"; }          # menu option
+opt()  { echo -e "  ${T}❯${N} ${T}$1${N} $2"; }          # menu option
 optx() { echo -e "  ${T}❯${N} ${R}$1${N} $2"; }          # exit/back option
 ok()   { echo -e "  ${G}✔${N} $1"; }
 bad()  { echo -e "  ${R}✘${N} $1"; }
 step() { echo -e "\n  ${Y}➜${N} ${W}$1${N}"; }
-ask()  { printf "  ${T}❯${N} %s " "$1"; }                 # prompt prefix
+ask()  { printf "${T}%s${N} " "$1"; }                 # prompt prefix
 
 sysinfo() {
   local ip free n last
@@ -200,8 +200,6 @@ while true; do
   opt 1 "Download backup"
   opt 2 "Import backup"
   optx 0 "Exit"
-  echo
-  sysinfo
   echo
   ask "Select an option:"; read -r ch
   case $ch in
