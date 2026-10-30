@@ -1,5 +1,5 @@
 #!/bin/bash
-# MAS Backup - GoFile backup/restore menu
+# MAS GUI v4.4 - GoFile backup/restore menu
 # Run: bash <(curl -sL itzmasgaming.github.io/gui/mas-backup)
 
 [ "$(id -u)" -ne 0 ] && { echo "Run as root."; exit 1; }
@@ -9,7 +9,11 @@ HIST=$DIR/history.txt
 TOKEN_FILE=$DIR/token
 mkdir -p "$DIR"; touch "$HIST"
 
-G='\033[1;32m'; R='\033[1;31m'; C='\033[1;36m'; Y='\033[1;33m'; N='\033[0m'
+[[ "${LANG:-}${LC_ALL:-}" != *[Uu][Tt][Ff]* ]] && export LANG=C.UTF-8 LC_ALL=C.UTF-8
+VER="v4.4"
+T='\033[38;5;115m'; G='\033[1;32m'; R='\033[1;31m'; C='\033[1;36m'; Y='\033[1;33m'
+W='\033[1;37m'; D='\033[2m'; N='\033[0m'
+BW=52   # box width
 
 # ---- dependencies ----
 need() {
@@ -25,45 +29,70 @@ need() {
   done
 }
 
-banner() {
+# centered line inside the box
+bline() { local t="$1" col="$2" pad l r tt="${1//◆/x}"; pad=$(( BW - 2 - ${#tt} )); l=$(( pad / 2 )); r=$(( pad - l ))
+  printf "${T}┃${N}%*s${col}%s${N}%*s${T}┃${N}\n" $l "" "$t" $r ""; }
+
+banner() {   # $1 = sub title
   clear
-  echo -e "${C}=============================="
-  echo -e "        MAS  BACKUP"
-  echo -e "==============================${N}"
+  local h; h=$(printf '━%.0s' $(seq 1 $((BW-2))))
+  echo
+  echo -e "${T}┏${h}┓${N}"
+  bline "" ""
+  bline "◆ MAS GUI ◆" "$W"
+  bline "${1:-Main Menu}" "$T"
+  bline "$VER" "$W"
+  bline "" ""
+  echo -e "${T}┗${h}┛${N}"
+  echo
 }
 
-pause() { echo; read -rp "Press Enter to continue..." _; }
+opt()  { echo -e "  ${T}❯${N} ${G}$1${N} $2"; }          # menu option
+optx() { echo -e "  ${T}❯${N} ${R}$1${N} $2"; }          # exit/back option
+ok()   { echo -e "  ${G}✔${N} $1"; }
+bad()  { echo -e "  ${R}✘${N} $1"; }
+step() { echo -e "\n  ${Y}➜${N} ${W}$1${N}"; }
+ask()  { printf "  ${T}❯${N} %s " "$1"; }                 # prompt prefix
+
+sysinfo() {
+  local ip free n last
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}'); free=$(df -h / 2>/dev/null | awk 'NR==2{print $4}')
+  n=$(wc -l < "$HIST" 2>/dev/null); last=$(tail -1 "$HIST" 2>/dev/null | cut -d'|' -f1)
+  echo -e "  ${D}Host${N} ${W}$(hostname)${N}  ${D}IP${N} ${W}${ip:-?}${N}  ${D}Free${N} ${W}${free:-?}${N}"
+  echo -e "  ${D}Backups${N} ${W}${n:-0}${N}  ${D}Last${N} ${W}${last:-never}${N}"
+}
+
+pause() { echo; printf "  ${D}Press Enter to go back...${N}"; read -r _; }
 
 # ---- 1) DOWNLOAD (create) BACKUP -> GoFile ----
 do_backup() {
-  banner
-  echo -e "${G}Backup this VPS to GoFile${N}\n"
-  echo "What to back up?"
-  echo "  1) Default  (/home /root /etc /var/www /opt /srv)"
-  echo "  2) Full system (everything)"
-  echo "  3) Custom folders"
-  read -rp "Choose [1]: " m; m=${m:-1}
+  banner "Download Backup"
+  echo -e "  ${W}What to back up?${N}\n"
+  opt 1 "Default ${D}(/home /root /etc /var/www /opt /srv)${N}"
+  opt 2 "Full system ${D}(everything)${N}"
+  opt 3 "Custom folders"
+  echo; ask "Select an option [1]:"; read -r m; m=${m:-1}
 
   EXC=(--exclude=proc --exclude=sys --exclude=dev --exclude=run --exclude=tmp --exclude=mnt
        --exclude=media --exclude=lost+found --exclude=swapfile --exclude=root/.masgui
        --exclude=var/cache --exclude=var/tmp)
   case $m in
     2) PATHS=(.) ;;
-    3) read -rp "Folders (space separated, e.g. /home /opt/app): " c
+    3) ask "Folders (e.g. /home /opt/app):"; read -r c
        PATHS=(); for p in $c; do [ -e "$p" ] && PATHS+=("${p#/}") || echo "Skip (not found): $p"; done ;;
     *) PATHS=(); for p in home root etc var/www opt srv; do [ -e "/$p" ] && PATHS+=("$p"); done ;;
   esac
-  [ ${#PATHS[@]} -eq 0 ] && { echo -e "${R}Nothing to back up.${N}"; pause; return; }
+  [ ${#PATHS[@]} -eq 0 ] && { bad "Nothing to back up."; pause; return; }
 
   NAME="mas-$(hostname)-$(date +%Y%m%d-%H%M%S).tar.gz"
   OUT="$DIR/$NAME"
-  echo -e "\n${Y}[1/2] Creating archive...${N}"
+  step "[1/2] Creating archive..."
   tar -C / -czpf "$OUT" "${EXC[@]}" "${PATHS[@]}" 2>"$DIR/tar.err"
   rc=$?
   if [ $rc -gt 1 ]; then echo -e "${R}Archive failed:${N}"; tail -5 "$DIR/tar.err"; rm -f "$OUT"; pause; return; fi
   echo -e "Size: $(du -h "$OUT" | cut -f1)"
 
-  echo -e "\n${Y}[2/2] Uploading to GoFile...${N}"
+  step "[2/2] Uploading to GoFile..."
   AUTH=()
   [ -s "$TOKEN_FILE" ] && AUTH=(-H "Authorization: Bearer $(cat "$TOKEN_FILE")")
   curl -# "${AUTH[@]}" -F "file=@$OUT" https://upload.gofile.io/uploadfile -o "$DIR/resp.json"
@@ -75,8 +104,8 @@ do_backup() {
   LINK=$(jq -r .data.downloadPage "$DIR/resp.json")
   echo "$(date '+%Y-%m-%d %H:%M')|$(hostname)|$NAME|$LINK" >> "$HIST"
   rm -f "$OUT"
-  echo -e "\n${G}DONE! Backup link (saved):${N}"
-  echo -e "${C}$LINK${N}"
+  echo; ok "Backup done and saved!"
+  echo -e "  ${D}Link${N}  ${T}$LINK${N}"
   pause
 }
 
@@ -113,44 +142,43 @@ fetch_gofile() {
 
 # ---- 2) IMPORT BACKUP <- GoFile ----
 do_import() {
-  banner
-  echo -e "${G}Import backup from GoFile${N}\n"
+  banner "Import Backup"
   if [ -s "$HIST" ]; then
     echo "Saved backups:"
     nl -w2 -s') ' <(awk -F'|' '{print $1"  "$2"  "$4}' "$HIST")
     echo
   fi
-  read -rp "Paste GoFile link (or number from list): " LINK
+  ask "GoFile link (or number from list):"; read -r LINK
   if [[ "$LINK" =~ ^[0-9]+$ ]]; then LINK=$(sed -n "${LINK}p" "$HIST" | awk -F'|' '{print $4}'); fi
   [ -z "$LINK" ] && { echo -e "${R}No link.${N}"; pause; return; }
   CODE=${LINK%/}; CODE=${CODE##*/}
 
-  read -rp "Restore to [/] (/ = same places as before): " TARGET; TARGET=${TARGET:-/}
+  ask "Restore to [/] (/ = same places):"; read -r TARGET; TARGET=${TARGET:-/}
   echo "Skip system files (network, fstab, hostname, SSH host keys)?"
-  read -rp "Say Y when moving to a DIFFERENT vps [Y/n]: " SK; SK=${SK:-Y}
+  ask "Y = moving to a DIFFERENT vps [Y/n]:"; read -r SK; SK=${SK:-Y}
   echo -e "${R}This will overwrite files in $TARGET.${N}"
-  read -rp "Continue? [y/N]: " ok; [[ "$ok" =~ ^[Yy]$ ]] || return
+  ask "Continue? [y/N]:"; read -r ok; [[ "$ok" =~ ^[Yy]$ ]] || return
 
   IN="$DIR/restore.tar.gz"; KEEP=0
-  echo -e "\n${Y}[1/2] Getting backup from GoFile...${N}"
+  step "[1/2] Getting backup from GoFile..."
   if ! fetch_gofile "$CODE" "$IN"; then
     echo -e "\n${R}GoFile refused the download (it may have changed its protection).${N}"
-    echo "  1) Paste my GoFile account token (gofile.io/myprofile)"
-    echo "  2) Use a backup .tar.gz already on this VPS (path)"
-    echo "  0) Back"
-    read -rp "Choose: " o
+    echo; opt 1 "Paste my GoFile account token"
+    opt 2 "Use a backup .tar.gz already on this VPS"
+    optx 0 "Back"
+    echo; ask "Select an option:"; read -r o
     case $o in
-      1) read -rp "Token: " t; [ -z "$t" ] && return
+      1) ask "Token:"; read -r t; [ -z "$t" ] && return
          echo "$t" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
          fetch_gofile "$CODE" "$IN" || { echo -e "${R}Still failed.${N}"; pause; return; } ;;
-      2) read -rp "Path to .tar.gz: " p
+      2) ask "Path to .tar.gz:"; read -r p
          [ -f "$p" ] || { echo -e "${R}File not found.${N}"; pause; return; }
          IN="$p"; KEEP=1 ;;
       *) return ;;
     esac
   fi
 
-  echo -e "\n${Y}[2/2] Restoring to $TARGET ...${N}"
+  step "[2/2] Restoring to $TARGET ..."
   mkdir -p "$TARGET"
   SKIP=()
   if [[ "$SK" =~ ^[Yy]$ ]]; then
@@ -161,24 +189,25 @@ do_import() {
   tar -xzpf "$IN" -C "$TARGET" --numeric-owner "${SKIP[@]}" 2>"$DIR/tar.err"
   rc=$?
   [ $KEEP -eq 0 ] && rm -f "$IN"
-  [ $rc -gt 1 ] && { echo -e "${R}Restore had errors:${N}"; tail -5 "$DIR/tar.err"; } || echo -e "${G}DONE! Files restored.${N}"
+  [ $rc -gt 1 ] && { echo -e "${R}Restore had errors:${N}"; tail -5 "$DIR/tar.err"; } || ok "Files restored."
   echo "Tip: restart your services (nginx, docker...) or reboot."
   pause
 }
 
 need
 while true; do
-  banner
+  banner "Main Menu"
+  opt 1 "Download backup"
+  opt 2 "Import backup"
+  optx 0 "Exit"
   echo
-  echo -e "  ${G}1)${N} Download backup"
-  echo -e "  ${G}2)${N} Import backup"
-  echo -e "  ${R}0)${N} Exit"
+  sysinfo
   echo
-  read -rp "Choose: " ch
+  ask "Select an option:"; read -r ch
   case $ch in
     1) do_backup ;;
     2) do_import ;;
-    0) echo "Bye!"; exit 0 ;;
-    *) echo "Invalid option"; sleep 1 ;;
+    0) echo -e "\n  ${T}Bye!${N}\n"; exit 0 ;;
+    *) bad "Invalid option"; sleep 1 ;;
   esac
 done
