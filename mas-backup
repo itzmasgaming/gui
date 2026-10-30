@@ -1,5 +1,5 @@
 #!/bin/bash
-# MAS GUI v4.4 - GoFile backup/restore menu
+# MAS GUI v4.5 - GoFile backup/restore menu
 # Run: bash <(curl -sL itzmasgaming.github.io/gui/mas-backup)
 
 [ "$(id -u)" -ne 0 ] && { echo "Run as root."; exit 1; }
@@ -10,7 +10,7 @@ TOKEN_FILE=$DIR/token
 mkdir -p "$DIR"; touch "$HIST"
 
 [[ "${LANG:-}${LC_ALL:-}" != *[Uu][Tt][Ff]* ]] && export LANG=C.UTF-8 LC_ALL=C.UTF-8
-VER="v4.4"
+VER="v4.5"
 T='\033[38;5;115m'; G='\033[1;32m'; R='\033[1;31m'; C='\033[1;36m'; Y='\033[1;33m'
 W='\033[1;37m'; D='\033[2m'; N='\033[0m'
 BW=50   # box width
@@ -109,6 +109,36 @@ do_backup() {
   pause
 }
 
+is_gz() { [ "$(head -c2 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; }
+
+# ---- Google Drive (public "anyone with the link" files) ----
+fetch_gdrive() {
+  local link=$1 out=$2 id jar="$DIR/gd.cookie" page="$DIR/gd.tmp" uuid base
+  id=$(echo "$link" | sed -nE 's#.*/d/([A-Za-z0-9_-]+).*#\1#p')
+  [ -z "$id" ] && id=$(echo "$link" | sed -nE 's#.*[?&]id=([A-Za-z0-9_-]+).*#\1#p')
+  [ -z "$id" ] && { echo "  Could not find the file ID in that link."; return 1; }
+  base="https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t"
+  rm -f "$jar" "$page"
+  curl -# -L -c "$jar" -b "$jar" "$base" -o "$page" || return 1
+  if ! is_gz "$page"; then   # large-file warning page: read its hidden form field and retry
+    uuid=$(grep -oE 'name="uuid" value="[^"]+"' "$page" | head -1 | sed -E 's/.*value="([^"]+)".*/\1/')
+    if [ -n "$uuid" ]; then curl -# -L -c "$jar" -b "$jar" "$base&uuid=$uuid" -o "$page" || return 1; fi
+  fi
+  rm -f "$jar"
+  if is_gz "$page"; then mv "$page" "$out"; return 0; fi
+  if grep -qi 'quota\|too many users' "$page" 2>/dev/null; then echo "  Google Drive download quota exceeded. Try again later."
+  else echo "  Not a backup file. Set sharing to 'Anyone with the link' and check the link."; fi
+  rm -f "$page"; return 1
+}
+
+# ---- any direct download link (Dropbox, your own server, etc.) ----
+fetch_url() {
+  local url=$1 out=$2
+  url=${url/dl=0/dl=1}
+  curl -# -L -A "Mozilla/5.0" "$url" -o "$out" || return 1
+  is_gz "$out" || { echo "  Not a valid .tar.gz backup at that link."; rm -f "$out"; return 1; }
+}
+
 # ---- GoFile web-client style download (works for any public link, free) ----
 GF_UA="Mozilla/5.0"
 GF_H=(-H "User-Agent: $GF_UA" -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/" -H "X-BL: en-US")
@@ -127,7 +157,7 @@ gf_try() {   # $1=code $2=out $3=token
   [ -z "$furl" -o "$furl" = null ] && { echo "  No file found at this link."; return 1; }
   echo -e "${Y}Downloading...${N}"
   curl -# -L "${GF_H[@]}" -H "Cookie: accountToken=$token" "$furl" -o "$out" || return 1
-  tar -tzf "$out" >/dev/null 2>&1 || { echo "  Downloaded file is not a valid backup."; rm -f "$out"; return 1; }
+  is_gz "$out" || { echo "  Downloaded file is not a valid backup."; rm -f "$out"; return 1; }
 }
 
 fetch_gofile() {
@@ -140,39 +170,64 @@ fetch_gofile() {
   gf_try "$code" "$out" "$token"
 }
 
-# ---- 2) IMPORT BACKUP <- GoFile ----
+get_backup() {   # $1=kind $2=link $3=out
+  case $1 in
+    gofile) local c=${2%/}; c=${c##*/}; fetch_gofile "$c" "$3" ;;
+    gdrive) fetch_gdrive "$2" "$3" ;;
+    url)    fetch_url "$2" "$3" ;;
+  esac
+}
+
+# ---- 2) IMPORT BACKUP (GoFile / Google Drive / any link) ----
 do_import() {
   banner "Import Backup"
-  if [ -s "$HIST" ]; then
-    echo "Saved backups:"
-    nl -w2 -s') ' <(awk -F'|' '{print $1"  "$2"  "$4}' "$HIST")
-    echo
-  fi
-  ask "GoFile link (or number from list):"; read -r LINK
-  if [[ "$LINK" =~ ^[0-9]+$ ]]; then LINK=$(sed -n "${LINK}p" "$HIST" | awk -F'|' '{print $4}'); fi
-  [ -z "$LINK" ] && { echo -e "${R}No link.${N}"; pause; return; }
-  CODE=${LINK%/}; CODE=${CODE##*/}
+  opt 1 "GoFile link"
+  opt 2 "Google Drive"
+  opt 3 "3rd party ${D}(link to download)${N}"
+  echo -e "  ${D}❯ 4 More options coming soon${N}"
+  optx 0 "Back"
+  echo; ask "Select an option:"; read -r src
+  local kind LINK
+  case $src in
+    1) kind=gofile
+       if [ -s "$HIST" ]; then
+         echo; echo -e "  ${W}Saved backups:${N}"
+         nl -w4 -s') ' <(awk -F'|' '{print $1"  "$2"  "$4}' "$HIST")
+       fi
+       echo; ask "GoFile link (or number from list):"; read -r LINK
+       if [[ "$LINK" =~ ^[0-9]+$ ]]; then LINK=$(sed -n "${LINK}p" "$HIST" | awk -F'|' '{print $4}'); fi ;;
+    2) kind=gdrive
+       echo; echo -e "  ${D}The file must be shared as \"Anyone with the link\".${N}"
+       ask "Google Drive link:"; read -r LINK ;;
+    3) kind=url
+       echo; ask "Direct download link (https://...):"; read -r LINK ;;
+    4) echo -e "\n  ${Y}Coming soon!${N}"; pause; return ;;
+    *) return ;;
+  esac
+  [ -z "$LINK" ] && { bad "No link."; pause; return; }
 
+  echo
   ask "Restore to [/] (/ = same places):"; read -r TARGET; TARGET=${TARGET:-/}
-  echo "Skip system files (network, fstab, hostname, SSH host keys)?"
+  echo -e "  ${D}Skip system files (network, fstab, hostname, SSH host keys)?${N}"
   ask "Y = moving to a DIFFERENT vps [Y/n]:"; read -r SK; SK=${SK:-Y}
-  echo -e "${R}This will overwrite files in $TARGET.${N}"
+  echo -e "  ${R}This will overwrite files in $TARGET.${N}"
   ask "Continue? [y/N]:"; read -r ok; [[ "$ok" =~ ^[Yy]$ ]] || return
 
   IN="$DIR/restore.tar.gz"; KEEP=0
-  step "[1/2] Getting backup from GoFile..."
-  if ! fetch_gofile "$CODE" "$IN"; then
-    echo -e "\n${R}GoFile refused the download (it may have changed its protection).${N}"
-    echo; opt 1 "Paste my GoFile account token"
+  step "[1/2] Getting backup..."
+  if ! get_backup "$kind" "$LINK" "$IN"; then
+    echo; bad "Could not download the backup."; echo
+    [ "$kind" = gofile ] && opt 1 "Paste my GoFile account token"
     opt 2 "Use a backup .tar.gz already on this VPS"
     optx 0 "Back"
     echo; ask "Select an option:"; read -r o
     case $o in
-      1) ask "Token:"; read -r t; [ -z "$t" ] && return
+      1) [ "$kind" = gofile ] || return
+         ask "Token:"; read -r t; [ -z "$t" ] && return
          echo "$t" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
-         fetch_gofile "$CODE" "$IN" || { echo -e "${R}Still failed.${N}"; pause; return; } ;;
+         get_backup "$kind" "$LINK" "$IN" || { bad "Still failed."; pause; return; } ;;
       2) ask "Path to .tar.gz:"; read -r p
-         [ -f "$p" ] || { echo -e "${R}File not found.${N}"; pause; return; }
+         [ -f "$p" ] || { bad "File not found."; pause; return; }
          IN="$p"; KEEP=1 ;;
       *) return ;;
     esac
@@ -189,8 +244,8 @@ do_import() {
   tar -xzpf "$IN" -C "$TARGET" --numeric-owner "${SKIP[@]}" 2>"$DIR/tar.err"
   rc=$?
   [ $KEEP -eq 0 ] && rm -f "$IN"
-  [ $rc -gt 1 ] && { echo -e "${R}Restore had errors:${N}"; tail -5 "$DIR/tar.err"; } || ok "Files restored."
-  echo "Tip: restart your services (nginx, docker...) or reboot."
+  if [ $rc -gt 1 ]; then bad "Restore had errors:"; tail -5 "$DIR/tar.err"; else ok "Files restored."; fi
+  echo -e "  ${D}Tip: restart your services (nginx, docker...) or reboot.${N}"
   pause
 }
 
