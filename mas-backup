@@ -80,22 +80,35 @@ do_backup() {
   pause
 }
 
-# Try to fetch a GoFile link into a file. Uses saved account token if present, else guest.
-fetch_gofile() {
-  local code=$1 out=$2 token meta furl wt st
-  if [ -s "$TOKEN_FILE" ]; then token=$(cat "$TOKEN_FILE")
-  else token=$(curl -s -X POST https://api.gofile.io/accounts | jq -r .data.token 2>/dev/null); fi
-  [ -z "$token" -o "$token" = null ] && return 1
-  wt=$(curl -s https://gofile.io/dist/js/global.js | grep -oE 'wt["]?\s*[:=]\s*"[A-Za-z0-9]+"' | head -1 | grep -oE '"[A-Za-z0-9]+"' | tr -d '"')
-  [ -z "$wt" ] && wt=4fd6sg89d7s6
-  meta=$(curl -s -H "Authorization: Bearer $token" "https://api.gofile.io/contents/$code?wt=$wt")
+# ---- GoFile web-client style download (works for any public link, free) ----
+GF_UA="Mozilla/5.0"
+GF_H=(-H "User-Agent: $GF_UA" -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/" -H "X-BL: en-US")
+
+# X-Website-Token = sha256("UA::en-US::accountToken::timeSlot::salt"), changes every 4 hours
+gf_wt() { printf '%s' "${GF_UA}::en-US::${1}::$(( $(date +%s) / 14400 ))::12af056dacea0b" | sha256sum | cut -d' ' -f1; }
+
+gf_try() {   # $1=code $2=out $3=token
+  local code=$1 out=$2 token=$3 meta st furl
+  meta=$(curl -s "${GF_H[@]}" -H "Authorization: Bearer $token" -H "X-Website-Token: $(gf_wt "$token")" \
+         "https://api.gofile.io/contents/$code?cache=true&sortField=createTime&sortDirection=1")
   st=$(echo "$meta" | jq -r .status 2>/dev/null)
   if [ "$st" != ok ]; then echo -e "  GoFile says: ${st:-no response}"; return 1; fi
-  furl=$(echo "$meta" | jq -r '[.data.children[] | select(.type=="file")][0].link')
+  furl=$(echo "$meta" | jq -r '[.data.children[] | select(.type=="file")][0].link' 2>/dev/null)
+  [ -z "$furl" -o "$furl" = null ] && furl=$(echo "$meta" | jq -r 'select(.data.type=="file") | .data.link' 2>/dev/null)
   [ -z "$furl" -o "$furl" = null ] && { echo "  No file found at this link."; return 1; }
   echo -e "${Y}Downloading...${N}"
-  curl -# -L -H "Cookie: accountToken=$token" "$furl" -o "$out" || return 1
+  curl -# -L "${GF_H[@]}" -H "Cookie: accountToken=$token" "$furl" -o "$out" || return 1
   tar -tzf "$out" >/dev/null 2>&1 || { echo "  Downloaded file is not a valid backup."; rm -f "$out"; return 1; }
+}
+
+fetch_gofile() {
+  local code=$1 out=$2 token
+  # 1) saved account token (if any)
+  if [ -s "$TOKEN_FILE" ]; then gf_try "$code" "$out" "$(cat "$TOKEN_FILE")" && return 0; fi
+  # 2) free guest account
+  token=$(curl -s -X POST "${GF_H[@]}" -H "X-Website-Token: $(gf_wt "")" https://api.gofile.io/accounts | jq -r .data.token 2>/dev/null)
+  [ -z "$token" -o "$token" = null ] && { echo "  Could not create GoFile guest account."; return 1; }
+  gf_try "$code" "$out" "$token"
 }
 
 # ---- 2) IMPORT BACKUP <- GoFile ----
@@ -121,7 +134,7 @@ do_import() {
   IN="$DIR/restore.tar.gz"; KEEP=0
   echo -e "\n${Y}[1/2] Getting backup from GoFile...${N}"
   if ! fetch_gofile "$CODE" "$IN"; then
-    echo -e "\n${R}GoFile blocked the scripted download (API now needs a Premium token).${N}"
+    echo -e "\n${R}GoFile refused the download (it may have changed its protection).${N}"
     echo "  1) Paste my GoFile account token (gofile.io/myprofile)"
     echo "  2) Use a backup .tar.gz already on this VPS (path)"
     echo "  0) Back"
