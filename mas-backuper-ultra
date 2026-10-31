@@ -49,7 +49,9 @@ CLI (used by the Mas_Backup menu):
   set-guild   server id from env MAS_GUILD
   invite      print the bot invite link
   wipe        wipe the backup server (everything except owner + bot) and make it private
-  add-vps     add a VPS from env MAS_V_HOST/PORT/USER/PASS (tests SSH first), prints its number
+  add-local   add THIS machine as a VPS (no IP/password needed)
+  check       exit 0 if the bot is in the configured server, 3 if not
+  add-vps     add a remote VPS from env MAS_V_HOST/PORT/USER/PASS (tests SSH first), prints its number
   run         start the bot (slash commands: /setup /vps add /backup /importbackup /focusbackup)
 """
 from __future__ import annotations
@@ -57,6 +59,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -181,6 +184,80 @@ async def test_ssh(v: dict) -> None:
     conn = await ssh_connect(v)
     conn.close()
     await conn.wait_closed()
+
+
+class _Attrs:
+    def __init__(self, st):
+        self.permissions, self.size, self.mtime = st.st_mode, st.st_size, int(st.st_mtime)
+
+
+class _Entry:
+    def __init__(self, name, st):
+        self.filename, self.attrs = name, _Attrs(st)
+
+
+class _LocalFile:
+    def __init__(self, path, mode):
+        self.path, self.mode, self.f = path, mode, None
+
+    async def __aenter__(self):
+        self.f = await asyncio.to_thread(open, self.path, self.mode)
+        return self
+
+    async def __aexit__(self, *a):
+        await asyncio.to_thread(self.f.close)
+
+    async def read(self, n):
+        return await asyncio.to_thread(self.f.read, n)
+
+    async def write(self, b):
+        return await asyncio.to_thread(self.f.write, b)
+
+
+class LocalSFTP:
+    """Same interface as the SFTP client, but for the machine the bot runs on (no SSH needed)."""
+
+    async def readdir(self, p):
+        def _r():
+            out = []
+            with os.scandir(p) as it:
+                for e in it:
+                    try:
+                        out.append(_Entry(e.name, e.stat(follow_symlinks=False)))
+                    except OSError:
+                        pass
+            return out
+        return await asyncio.to_thread(_r)
+
+    def open(self, path, mode):
+        return _LocalFile(path, mode)
+
+    async def makedirs(self, p, exist_ok=True):
+        await asyncio.to_thread(os.makedirs, p, exist_ok=exist_ok)
+
+    async def posix_rename(self, a, b):
+        await asyncio.to_thread(os.replace, a, b)
+
+    async def chmod(self, p, mode):
+        await asyncio.to_thread(os.chmod, p, mode)
+
+    async def remove(self, p):
+        await asyncio.to_thread(os.remove, p)
+
+
+@contextlib.asynccontextmanager
+async def open_fs(v: dict):
+    """vps flagged local -> this machine; otherwise SFTP over SSH."""
+    if v.get("local"):
+        yield LocalSFTP()
+        return
+    conn = await ssh_connect(v)
+    try:
+        async with conn.start_sftp_client() as sftp:
+            yield sftp
+    finally:
+        conn.close()
+        await conn.wait_closed()
 
 
 def excluded(path: str, excl: list[str]) -> bool:
@@ -440,9 +517,8 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     stats = {"ok": 0, "skipped": 0, "failed": 0, "bytes": 0}
     log.info("backup of vps%d started", vps_n)
     await status.update(f"vps-{vps_n}: connecting...", force=True)
-    conn = await ssh_connect(v)
     try:
-        async with conn.start_sftp_client() as sftp:
+        async with open_fs(v) as sftp:
             async for path, attrs in walk(sftp, "/", excl):
                 try:
                     res = await backup_file(guild, sftp, v, path, attrs, state, cfg, cache, rp)
@@ -460,8 +536,6 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
                 )
     finally:
         save_state(vps_n, state)
-        conn.close()
-        await conn.wait_closed()
     log.info("backup of vps%d finished: %s", vps_n, stats)
     await status.update(
         f"vps-{vps_n} DONE - {stats['ok']} saved, {stats['skipped']} unchanged, "
@@ -507,20 +581,15 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status) -> None:
             records[rec["path"]] = rec            # newest record for a path wins
     log.info("import vps%d: %d files in index", vps_n, len(records))
     ok = failed = 0
-    conn = await ssh_connect(v)
-    try:
-        async with conn.start_sftp_client() as sftp:
-            for rec in records.values():
-                try:
-                    await restore_file(guild, sftp, rec)
-                    ok += 1
-                except Exception as e:  # noqa: BLE001
-                    failed += 1
-                    log.exception("restore failed for %s: %s", rec.get("path"), e)
-                await status.update(f"vps-{vps_n} restore: {ok}/{len(records)} done, {failed} failed")
-    finally:
-        conn.close()
-        await conn.wait_closed()
+    async with open_fs(v) as sftp:
+        for rec in records.values():
+            try:
+                await restore_file(guild, sftp, rec)
+                ok += 1
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                log.exception("restore failed for %s: %s", rec.get("path"), e)
+            await status.update(f"vps-{vps_n} restore: {ok}/{len(records)} done, {failed} failed")
     await status.update(f"vps-{vps_n} restore DONE - {ok} restored, {failed} failed", force=True)
 
 
@@ -725,6 +794,8 @@ class Bot(discord.Client):
 
     async def on_ready(self):
         log.info("Bot online as %s", self.user)
+        if self.get_guild(self.gid) is None:
+            log.warning("Bot isn't in the configured server (%s). Invite it, then restart.", self.gid)
         for g in self.guilds:
             if g.id != self.gid:
                 log.warning("leaving unexpected server %s", g.name)
@@ -779,9 +850,22 @@ class WipeClient(discord.Client):
             await self.close()
 
 
+class CheckClient(discord.Client):
+    def __init__(self, gid: int):
+        super().__init__(intents=discord.Intents.default())
+        self.gid, self.code = gid, 3
+
+    async def on_ready(self):
+        g = self.get_guild(self.gid)
+        if g:
+            log.info("Bot is in the server: %s", g.name)
+            self.code = 0
+        await self.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["set-token", "set-guild", "invite", "wipe", "add-vps", "run"])
+    ap.add_argument("cmd", choices=["set-token", "set-guild", "invite", "wipe", "add-vps", "add-local", "check", "run"])
     args = ap.parse_args()
     setup_logging()
     cfg = load_cfg()
@@ -829,11 +913,26 @@ def main() -> int:
         print(n)
         return 0
 
+    if args.cmd == "add-local":
+        for n in vps_numbers():
+            if load_vps(n).get("local"):
+                log.info("This VPS is already added as vps%d.", n)
+                print(n)
+                return 0
+        n = next_vps_number()
+        save_vps(n, {"local": True, "host": "localhost", "user": "local"})
+        print(n)
+        return 0
+
     if "guild_id" not in cfg:
         log.error("No server configured. Use menu option 1.")
         return 1
 
     try:
+        if args.cmd == "check":
+            c = CheckClient(int(cfg["guild_id"]))
+            c.run(cfg["token"], log_handler=None)
+            return c.code
         if args.cmd == "wipe":
             c = WipeClient(int(cfg["guild_id"]))
             c.run(cfg["token"], log_handler=None)
@@ -966,6 +1065,46 @@ setup_discord_bot() {
   pause
 }
 
+# ---------------------------------------------------------------- start bot (checks server first)
+start_bot_flow() {
+  if ! grep -q '"guild_id"' "$DATA_DIR/config.json" 2>/dev/null; then
+    err "Run option 1 (Setup Discord bot) first."; return 1
+  fi
+  while true; do
+    echo "  Checking if the bot is in the server..."
+    "$PY" "$BOT" check; rc=$?
+    if [[ $rc -eq 0 ]]; then
+      start_bot
+      return 0
+    elif [[ $rc -eq 3 ]]; then
+      echo; err "Bot isn't in the server."
+    else
+      echo; err "Could not check the server (see error above)."
+    fi
+    echo
+    echo "  Invite link (add the bot, then choose 2):"
+    "$PY" "$BOT" invite
+    echo
+    echo "  ${AQUA}❯${RST} 1 Change server ID"
+    echo "  ${AQUA}❯${RST} 2 Try again"
+    echo "  ${AQUA}❯${RST} 0 Exit"
+    echo
+    read -rp "  Select an option: " c
+    case "$c" in
+      1) read -rp "  New server ID (17-20 digits): " gid
+         if [[ "$gid" =~ ^[0-9]{17,20}$ ]]; then
+           MAS_GUILD="$gid" "$PY" "$BOT" set-guild && ok "Server ID changed."
+         else
+           err "That doesn't look like a Discord server ID."
+         fi ;;
+      2) ;;
+      0) return 1 ;;
+      *) err "Invalid option" ;;
+    esac
+    echo
+  done
+}
+
 # ---------------------------------------------------------------- 2) Setup LVIB
 setup_lvib() {
   header "Setup LVIB"
@@ -974,24 +1113,23 @@ setup_lvib() {
     err "Run option 1 (Setup Discord bot) first."; pause; return
   fi
 
-  echo "  LVIB = Load VPS Into Bot. Enter SSH access for the VPS to back up."
+  # The bot runs on the VPS it backs up, so no IP / port / password is needed.
+  num="$("$PY" "$BOT" add-local)" || { err "Could not add this VPS."; pause; return; }
+  ok "This VPS is loaded as vps${num}  ($DATA_DIR/vps${num}.itzmasgaming)"
   echo
-  read -rp  "  VPS IP / host: " host
-  read -rp  "  SSH port [22]: " port; port="${port:-22}"
-  read -rp  "  Username [root]: " user; user="${user:-root}"
-  read -rsp "  Password: " pass; echo
-  [[ -z "$host" || -z "$pass" ]] && { err "Host and password are required."; pause; return; }
+  start_bot_flow && {
+    echo
+    echo "  Next: in your Discord backup server, run  ${BOLD}/setup${RST}"
+    echo "  Other VPS later:  ${BOLD}/vps add${RST}"
+  }
+  pause
+}
 
-  echo "  Testing SSH connection..."
-  num="$(MAS_V_HOST="$host" MAS_V_PORT="$port" MAS_V_USER="$user" MAS_V_PASS="$pass" "$PY" "$BOT" add-vps)" \
-    || { err "Could not add VPS (see error above)."; pause; return; }
-  unset pass
-
-  ok "Created $DATA_DIR/vps${num}.itzmasgaming"
-  start_bot
-  echo
-  echo "  Next: in your Discord backup server, run  ${BOLD}/setup${RST}"
-  echo "  More VPS later:  ${BOLD}/vps add${RST}"
+# ---------------------------------------------------------------- 5) Start bot
+start_bot_menu() {
+  header "Start Bot"
+  ensure_env || { pause; return; }
+  start_bot_flow
   pause
 }
 
@@ -1003,6 +1141,7 @@ auto_backup_menu() {
     echo "  ${AQUA}❯${RST} 2 Setup LVIB (Load VPS into bot)"
     echo "  ${AQUA}❯${RST} 3 Bot status / logs"
     echo "  ${AQUA}❯${RST} 4 Coming soon"
+    echo "  ${AQUA}❯${RST} 5 Start bot"
     echo "  ${AQUA}❯${RST} 0 Back"
     echo
     read -rp "  Select an option: " choice
@@ -1011,6 +1150,7 @@ auto_backup_menu() {
       2) setup_lvib ;;
       3) bot_status ;;
       4) echo "  Coming soon..."; sleep 1 ;;
+      5) start_bot_menu ;;
       0) return ;;
       *) err "Invalid option"; sleep 1 ;;
     esac
