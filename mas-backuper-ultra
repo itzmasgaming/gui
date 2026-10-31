@@ -998,6 +998,29 @@ UNIT
   fi
 }
 
+stop_bot() {
+  header "Stop Bot"
+  local stopped=0
+  if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q mas-backup-bot; then
+    systemctl stop mas-backup-bot
+    systemctl disable mas-backup-bot >/dev/null 2>&1   # stay off after a reboot too
+    stopped=1
+  fi
+  if [[ -f "$PIDFILE" ]]; then
+    if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      kill "$(cat "$PIDFILE")" 2>/dev/null
+      stopped=1
+    fi
+    rm -f "$PIDFILE"
+  fi
+  if [[ $stopped -eq 1 ]]; then
+    ok "Bot stopped. Use option 5 to start it again."
+  else
+    warn "Bot was not running."
+  fi
+  pause
+}
+
 bot_status() {
   header "Bot Status"
   if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q mas-backup-bot; then
@@ -1142,6 +1165,7 @@ auto_backup_menu() {
     echo "  ${AQUA}❯${RST} 3 Bot status / logs"
     echo "  ${AQUA}❯${RST} 4 Coming soon"
     echo "  ${AQUA}❯${RST} 5 Start bot"
+    echo "  ${AQUA}❯${RST} 6 Stop bot"
     echo "  ${AQUA}❯${RST} 0 Back"
     echo
     read -rp "  Select an option: " choice
@@ -1151,6 +1175,7 @@ auto_backup_menu() {
       3) bot_status ;;
       4) echo "  Coming soon..."; sleep 1 ;;
       5) start_bot_menu ;;
+      6) stop_bot ;;
       0) return ;;
       *) err "Invalid option"; sleep 1 ;;
     esac
