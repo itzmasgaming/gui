@@ -1,0 +1,1034 @@
+#!/usr/bin/env bash
+# MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
+# Run with:  bash <(curl -fsSL https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-discord-bot-backuper.txt)
+
+AQUA=$'\e[38;5;51m'; RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BOLD=$'\e[1m'; RST=$'\e[0m'
+W=48
+
+if [[ $EUID -eq 0 ]]; then DATA_DIR="/opt/mas-backup"; else DATA_DIR="$HOME/.mas-backup"; fi
+export MAS_DATA_DIR="$DATA_DIR"
+PY="$DATA_DIR/venv/bin/python"
+BOT="$DATA_DIR/mas_backup_bot.py"
+LOG="$DATA_DIR/bot.log"
+PIDFILE="$DATA_DIR/bot.pid"
+
+center() {
+  local t="$1" pad l r
+  pad=$(( W - ${#t} )); l=$(( pad / 2 )); r=$(( pad - l ))
+  printf '┃%*s%s%*s┃\n' "$l" '' "$t" "$r" ''
+}
+
+header() {
+  local sub="$1" line
+  line="$(printf '━%.0s' $(seq 1 $W))"
+  clear
+  echo
+  echo "${AQUA}┏${line}┓"
+  center ""
+  center "◆ MAS GUI ◆"
+  center "$sub"
+  center "v6.0"
+  center ""
+  echo "┗${line}┛${RST}"
+  echo
+}
+
+err()   { echo "  ${RED}✖ $*${RST}"; }
+ok()    { echo "  ${GRN}✔ $*${RST}"; }
+warn()  { echo "  ${YLW}⚠ $*${RST}"; }
+pause() { echo; read -rp "  Press Enter to continue..." _; }
+
+# The Discord bot lives inside this file and is written to disk when needed.
+write_bot() {
+cat > "$BOT" <<'MAS_BOT_EOF'
+#!/usr/bin/env python3
+"""MAS Auto Backup bot - LVIB (Load VPS Into Bot).
+
+CLI (used by the Mas_Backup menu):
+  set-token   token from env MAS_TOKEN
+  set-guild   server id from env MAS_GUILD
+  invite      print the bot invite link
+  wipe        wipe the backup server (everything except owner + bot) and make it private
+  add-vps     add a VPS from env MAS_V_HOST/PORT/USER/PASS (tests SSH first), prints its number
+  run         start the bot (slash commands: /setup /vps add /backup /importbackup /focusbackup)
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import hashlib
+import io
+import json
+import logging
+import os
+import posixpath
+import re
+import stat
+import sys
+import time
+from pathlib import Path
+
+import asyncssh
+import discord
+from discord import app_commands
+
+DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
+CONFIG = DATA_DIR / "config.json"
+LOGFILE = DATA_DIR / "bot.log"
+
+WARNING = "# DONT DELETE OR DATA WILL LOSTED"
+SEP = "｜"                      # full-width bar, used for spaces and part names
+MARKER = "mas-backups"          # existence of this channel == "backups already exist"
+SYSTEM_CAT = "mas-system"
+RECORDS = "read-paths-mas"      # per-VPS index channel (inside the vps-N category)
+CONTROL = "mas-control"
+MAX_PER_CATEGORY = 50
+NO_MENTIONS = discord.AllowedMentions.none()
+
+DEFAULT_EXCLUDE = [
+    "/proc", "/sys", "/dev", "/run", "/tmp", "/mnt", "/media",
+    "/lost+found", "/var/run", "/var/lock", "/swapfile", "/snap",
+]
+
+log = logging.getLogger("mas")
+
+
+# ------------------------------------------------------------------ storage
+def setup_logging() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(LOGFILE)],
+    )
+
+
+def write_private(path: Path, obj: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.chmod(path, 0o600)
+
+
+def load_cfg() -> dict:
+    return json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+
+
+def save_cfg(cfg: dict) -> None:
+    write_private(CONFIG, cfg)
+
+
+def vps_file(n: int) -> Path:
+    return DATA_DIR / f"vps{n}.itzmasgaming"
+
+
+def vps_numbers() -> list[int]:
+    nums = []
+    for p in DATA_DIR.glob("vps*.itzmasgaming"):
+        m = re.fullmatch(r"vps(\d+)\.itzmasgaming", p.name)
+        if m:
+            nums.append(int(m.group(1)))
+    return sorted(nums)
+
+
+def next_vps_number() -> int:
+    used = set(vps_numbers())
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
+
+def load_vps(n: int) -> dict:
+    p = vps_file(n)
+    if not p.exists():
+        raise FileNotFoundError(f"vps{n}.itzmasgaming does not exist (use /vps add)")
+    return json.loads(p.read_text())
+
+
+def save_vps(n: int, data: dict) -> None:
+    data = dict(data)
+    data["vps"] = n
+    data.setdefault("created", int(time.time()))
+    write_private(vps_file(n), data)
+
+
+def state_file(n: int) -> Path:
+    return DATA_DIR / f"vps{n}.state.json"
+
+
+def load_state(n: int) -> dict:
+    p = state_file(n)
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def save_state(n: int, st: dict) -> None:
+    write_private(state_file(n), st)
+
+
+# ------------------------------------------------------------------ ssh
+async def ssh_connect(v: dict):
+    # known_hosts=None disables host-key checking (simple, but open to MITM).
+    return await asyncssh.connect(
+        v["host"], port=int(v.get("port", 22)), username=v.get("user", "root"),
+        password=v.get("password") or None, known_hosts=None, keepalive_interval=30,
+    )
+
+
+async def test_ssh(v: dict) -> None:
+    conn = await ssh_connect(v)
+    conn.close()
+    await conn.wait_closed()
+
+
+def excluded(path: str, excl: list[str]) -> bool:
+    for e in excl:
+        e = e.rstrip("/")
+        if path == e or path.startswith(e + "/"):
+            return True
+    # never back up the bot's own data (token!) if the VPS is the bot host
+    return any(p in (".mas-backup", "mas-backup") for p in path.split("/"))
+
+
+async def walk(sftp, root: str, excl: list[str]):
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        if excluded(d, excl):
+            continue
+        try:
+            entries = await sftp.readdir(d)
+        except Exception as e:  # noqa: BLE001
+            log.error("cannot list %s: %s", d, e)
+            continue
+        for e in entries:
+            name = e.filename.decode(errors="replace") if isinstance(e.filename, bytes) else e.filename
+            if name in (".", ".."):
+                continue
+            full = d.rstrip("/") + "/" + name
+            perm = e.attrs.permissions or 0
+            if stat.S_ISDIR(perm):
+                stack.append(full)
+            elif stat.S_ISREG(perm):      # symlinks/devices/sockets are skipped
+                yield full, e.attrs
+
+
+# ------------------------------------------------------------------ naming
+def safe_name(name: str) -> str:
+    return name.replace(" ", SEP)
+
+
+def file_label(name: str, part: int | None) -> str:
+    base = safe_name(name)[:150]
+    return base if part is None else f"{base}{SEP}part{part}"
+
+
+def chan_name(bucket: str) -> str:
+    s = re.sub(r"[^a-z0-9_-]+", "-", bucket.lower()).strip("-")[:90]
+    return s or "root"
+
+
+def bucket_of(path: str, depth: int) -> str:
+    dirs = [p for p in path.split("/") if p][:-1]
+    return "/" + "/".join(dirs[:depth]) if dirs else "/"
+
+
+def part_limit(guild: discord.Guild, cfg: dict) -> int:
+    cap = int(cfg.get("max_part_mb", 20)) * 1024 * 1024
+    return max(1024 * 1024, min(cap, guild.filesize_limit) - 64 * 1024)
+
+
+# ------------------------------------------------------------------ discord helpers
+def allowed_ids(guild: discord.Guild) -> set[int]:
+    cfg = load_cfg()
+    return {guild.owner_id, guild.me.id, *[int(x) for x in cfg.get("allowed_user_ids", [])]}
+
+
+def backups_exist(guild: discord.Guild) -> bool:
+    return discord.utils.get(guild.text_channels, name=MARKER) is not None
+
+
+async def wipe_guild(guild: discord.Guild, keep: discord.abc.GuildChannel | None = None) -> None:
+    allowed = allowed_ids(guild)
+    log.info("Wiping %s (%s)", guild.name, guild.id)
+    async for m in guild.fetch_members(limit=None):
+        if m.id in allowed:
+            continue
+        try:
+            await m.kick(reason="MAS backup server wipe")
+            log.info("kicked %s", m)
+        except Exception as e:  # noqa: BLE001
+            log.error("could not kick %s: %s (move the bot role higher)", m, e)
+    for ch in list(guild.channels):
+        if keep is not None and ch.id == keep.id:
+            continue
+        try:
+            await ch.delete(reason="MAS backup server wipe")
+        except Exception as e:  # noqa: BLE001
+            log.error("could not delete channel %s: %s (Community servers must disable Community first)", ch.name, e)
+    try:
+        for inv in await guild.invites():
+            await inv.delete(reason="MAS backup server is private")
+    except Exception as e:  # noqa: BLE001
+        log.error("could not clear invites: %s", e)
+    try:
+        await guild.default_role.edit(permissions=discord.Permissions.none(), reason="MAS private server")
+    except Exception as e:  # noqa: BLE001
+        log.error("could not make @everyone private: %s", e)
+    log.info("Wipe finished.")
+
+
+async def ensure_marker(guild: discord.Guild):
+    ch = discord.utils.get(guild.text_channels, name=MARKER)
+    if ch:
+        return ch, False
+    cat = discord.utils.get(guild.categories, name=SYSTEM_CAT) or await guild.create_category(SYSTEM_CAT)
+    ch = await guild.create_text_channel(MARKER, category=cat, topic="Backup marker. DO NOT DELETE.")
+    for _ in range(10):
+        await ch.send(WARNING)
+    return ch, True
+
+
+async def ensure_category(guild: discord.Guild, vps: int, k: int = 1) -> discord.CategoryChannel:
+    name = f"vps-{vps}" if k == 1 else f"vps-{vps}-{k}"
+    return discord.utils.get(guild.categories, name=name) or await guild.create_category(name)
+
+
+async def records_channel(guild: discord.Guild, vps: int) -> discord.TextChannel:
+    cat = await ensure_category(guild, vps)
+    ch = discord.utils.get(cat.text_channels, name=RECORDS)
+    return ch or await guild.create_text_channel(RECORDS, category=cat, topic=f"path index for vps-{vps}")
+
+
+def vps_categories(guild: discord.Guild, vps: int) -> list[discord.CategoryChannel]:
+    pat = re.compile(rf"vps-{vps}(-\d+)?")
+    cats = [c for c in guild.categories if pat.fullmatch(c.name)]
+    return sorted(cats, key=lambda c: (len(c.name), c.name))
+
+
+async def bucket_channel(guild, vps, bucket, cache):
+    key = (vps, bucket)
+    if key in cache:
+        return cache[key]
+    cats = vps_categories(guild, vps) or [await ensure_category(guild, vps)]
+    for cat in cats:
+        for ch in cat.text_channels:
+            if ch.topic == bucket:
+                cache[key] = ch
+                return ch
+    for cat in cats:
+        if len(cat.channels) < MAX_PER_CATEGORY:
+            break
+    else:
+        cat = await ensure_category(guild, vps, len(cats) + 1)
+    ch = await guild.create_text_channel(chan_name(bucket), category=cat, topic=bucket)
+    cache[key] = ch
+    return ch
+
+
+async def send_file(ch, data: bytes, fname: str, tries: int = 5):
+    for i in range(tries):
+        try:
+            return await ch.send(file=discord.File(io.BytesIO(data), filename=fname))
+        except discord.HTTPException as e:
+            if e.status in (400, 403, 404, 413):
+                raise
+            log.warning("upload of %s failed (%s), retry %d/%d", fname, e, i + 1, tries)
+        except (asyncio.TimeoutError, OSError) as e:
+            log.warning("upload of %s failed (%s), retry %d/%d", fname, e, i + 1, tries)
+        await asyncio.sleep(5 * (i + 1))
+    raise RuntimeError(f"upload failed after {tries} tries: {fname}")
+
+
+async def post_record(ch, rec: dict) -> None:
+    txt = json.dumps(rec, separators=(",", ":"), ensure_ascii=False)
+    body = "```json\n" + txt + "\n```"
+    if len(body) <= 1990:
+        await ch.send(body, allowed_mentions=NO_MENTIONS)
+    else:  # many parts: keep under the 2000-char message limit by using an attachment
+        await send_file(ch, txt.encode(), "record.json")
+
+
+async def parse_record(msg: discord.Message) -> dict | None:
+    text = None
+    if msg.attachments and msg.attachments[0].filename == "record.json":
+        text = (await msg.attachments[0].read()).decode()
+    elif msg.content:
+        text = msg.content.strip()
+        m = re.fullmatch(r"```(?:json)?\n(.*)\n```", text, re.S)
+        if m:
+            text = m.group(1)
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) and "path" in d and "ch" in d and "msgs" in d else None
+
+
+async def read_exact(f, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = await f.read(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return bytes(buf)
+
+
+class Status:
+    def __init__(self, channel, title: str):
+        self.channel, self.title, self.msg, self.last = channel, title, None, 0.0
+
+    async def update(self, text: str, force: bool = False) -> None:
+        text = f"**{self.title}** - {text}"[:1900]
+        now = time.monotonic()
+        try:
+            if self.msg is None:
+                self.msg = await self.channel.send(text, allowed_mentions=NO_MENTIONS)
+                self.last = now
+            elif force or now - self.last > 15:
+                await self.msg.edit(content=text)
+                self.last = now
+        except discord.HTTPException:
+            pass
+
+
+# ------------------------------------------------------------------ backup / import
+async def backup_file(guild, sftp, v, path, attrs, state, cfg, cache, rp) -> str:
+    size = attrs.size or 0
+    key = f"{size}|{attrs.mtime}"
+    if state.get(path) == key:
+        return "skipped"
+    limit = part_limit(guild, cfg)
+    ch = await bucket_channel(guild, v["vps"], bucket_of(path, int(cfg.get("bucket_depth", 2))), cache)
+    name = posixpath.basename(path)
+    h = hashlib.sha256()
+    msgs: list[int] = []
+    if size > 0:
+        async with sftp.open(path, "rb") as f:
+            n = 0
+            while True:
+                data = await read_exact(f, limit)
+                if not data:
+                    break
+                n += 1
+                h.update(data)
+                label = file_label(name, n if size > limit else None)
+                msgs.append((await send_file(ch, data, label)).id)
+    rec = {
+        "link": f"https://discord.com/channels/{guild.id}/{ch.id}/{msgs[0]}" if msgs else "",
+        "vps": v["vps"], "path": path, "size": size,
+        "mode": (attrs.permissions or 0o644) & 0o7777, "mtime": attrs.mtime,
+        "sha256": h.hexdigest(), "ch": ch.id, "msgs": msgs,
+    }
+    await post_record(rp, rec)
+    state[path] = key
+    return str(size)
+
+
+async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
+    v, cfg = load_vps(vps_n), load_cfg()
+    excl = cfg.get("exclude", DEFAULT_EXCLUDE)
+    _, fresh = await ensure_marker(guild)
+    state = {} if fresh else load_state(vps_n)
+    rp = await records_channel(guild, vps_n)
+    cache: dict = {}
+    stats = {"ok": 0, "skipped": 0, "failed": 0, "bytes": 0}
+    log.info("backup of vps%d started", vps_n)
+    await status.update(f"vps-{vps_n}: connecting...", force=True)
+    conn = await ssh_connect(v)
+    try:
+        async with conn.start_sftp_client() as sftp:
+            async for path, attrs in walk(sftp, "/", excl):
+                try:
+                    res = await backup_file(guild, sftp, v, path, attrs, state, cfg, cache, rp)
+                    if res == "skipped":
+                        stats["skipped"] += 1
+                    else:
+                        stats["ok"] += 1
+                        stats["bytes"] += int(res)
+                except Exception as e:  # noqa: BLE001
+                    stats["failed"] += 1
+                    log.exception("backup failed for %s: %s", path, e)
+                await status.update(
+                    f"vps-{vps_n}: {stats['ok']} saved, {stats['skipped']} unchanged, "
+                    f"{stats['failed']} failed, {stats['bytes'] / 1048576:.1f} MB (now: `{path[-80:]}`)"
+                )
+    finally:
+        save_state(vps_n, state)
+        conn.close()
+        await conn.wait_closed()
+    log.info("backup of vps%d finished: %s", vps_n, stats)
+    await status.update(
+        f"vps-{vps_n} DONE - {stats['ok']} saved, {stats['skipped']} unchanged, "
+        f"{stats['failed']} failed, {stats['bytes'] / 1048576:.1f} MB", force=True)
+
+
+async def restore_file(guild, sftp, rec) -> None:
+    ch = guild.get_channel(int(rec["ch"]))
+    if ch is None:
+        raise ValueError(f"channel {rec['ch']} no longer exists")
+    path = rec["path"]
+    await sftp.makedirs(posixpath.dirname(path) or "/", exist_ok=True)
+    tmp = path + ".mas-restore"
+    h = hashlib.sha256()
+    try:
+        async with sftp.open(tmp, "wb") as f:
+            for mid in rec["msgs"]:
+                m = await ch.fetch_message(int(mid))
+                if m.channel.id != int(rec["ch"]) or not m.attachments:
+                    raise ValueError(f"message {mid} is not in the expected channel / has no data")
+                data = await m.attachments[0].read()   # fresh CDN url, fetched by message id
+                h.update(data)
+                await f.write(data)
+        if h.hexdigest() != rec["sha256"]:
+            raise ValueError("checksum mismatch")
+        await sftp.posix_rename(tmp, path)
+        await sftp.chmod(path, int(rec.get("mode", 0o644)))
+    except Exception:
+        try:
+            await sftp.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+async def run_import(guild: discord.Guild, vps_n: int, status: Status) -> None:
+    v = load_vps(vps_n)
+    rp = await records_channel(guild, vps_n)
+    records: dict[str, dict] = {}
+    async for msg in rp.history(limit=None, oldest_first=True):
+        rec = await parse_record(msg)
+        if rec and int(rec.get("vps", vps_n)) == vps_n:
+            records[rec["path"]] = rec            # newest record for a path wins
+    log.info("import vps%d: %d files in index", vps_n, len(records))
+    ok = failed = 0
+    conn = await ssh_connect(v)
+    try:
+        async with conn.start_sftp_client() as sftp:
+            for rec in records.values():
+                try:
+                    await restore_file(guild, sftp, rec)
+                    ok += 1
+                except Exception as e:  # noqa: BLE001
+                    failed += 1
+                    log.exception("restore failed for %s: %s", rec.get("path"), e)
+                await status.update(f"vps-{vps_n} restore: {ok}/{len(records)} done, {failed} failed")
+    finally:
+        conn.close()
+        await conn.wait_closed()
+    await status.update(f"vps-{vps_n} restore DONE - {ok} restored, {failed} failed", force=True)
+
+
+async def backup_job(bot, channel, guild, nums: list[int]) -> None:
+    if bot.lock.locked():
+        await channel.send("Another backup/restore is already running.")
+        return
+    async with bot.lock:
+        for n in nums:
+            status = Status(channel, f"vps-{n}")
+            try:
+                await run_backup(guild, n, status)
+            except Exception as e:  # noqa: BLE001
+                log.exception("backup of vps%d crashed: %s", n, e)
+                await channel.send(f"❌ vps-{n} backup failed: `{e}` (see console)")
+
+
+# ------------------------------------------------------------------ UI
+class Confirm(discord.ui.View):
+    def __init__(self, owner_id: int, yes: str = "Confirm", no: str = "Cancel"):
+        super().__init__(timeout=300)
+        self.owner_id, self.ok = owner_id, None
+        self.yes_btn.label, self.no_btn.label = yes, no
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def yes_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        self.ok = True
+        await i.response.edit_message(view=None)
+        self.stop()
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def no_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        self.ok = False
+        await i.response.edit_message(view=None)
+        self.stop()
+
+
+class VpsAddModal(discord.ui.Modal, title="Add VPS"):
+    number = discord.ui.TextInput(label="VPS number", placeholder="2", max_length=3)
+    host = discord.ui.TextInput(label="VPS IP / host", placeholder="1.2.3.4", max_length=255)
+    port = discord.ui.TextInput(label="SSH port", default="22", max_length=5)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+    password = discord.ui.TextInput(label="Password", max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            v = {"host": self.host.value.strip(), "port": int(self.port.value),
+                 "user": self.user.value.strip(), "password": self.password.value, "vps": n}
+            await test_ssh(v)
+            save_vps(n, v)
+            await ensure_category(interaction.guild, n)
+            await records_channel(interaction.guild, n)
+            log.info("VPS %d added via /vps add", n)
+            await interaction.followup.send(
+                f"✅ vps-{n} added. Run `/backup vps:{n}` to start backing it up.", ephemeral=True)
+        except Exception as e:  # noqa: BLE001
+            log.exception("/vps add failed: %s", e)
+            await interaction.followup.send(f"❌ Could not add VPS: `{e}`", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("modal error: %s", error)
+
+
+async def guard(interaction: discord.Interaction) -> bool:
+    cfg = load_cfg()
+    if interaction.guild is None or interaction.guild_id != int(cfg.get("guild_id", 0)):
+        await interaction.response.send_message("Wrong server.", ephemeral=True)
+        return False
+    if interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("Only the server owner can use this.", ephemeral=True)
+        return False
+    return True
+
+
+# ------------------------------------------------------------------ commands
+@app_commands.command(name="setup", description="Wipe this server (except owner + bot) and set up VPS backups")
+async def cmd_setup(interaction: discord.Interaction):
+    if not await guard(interaction):
+        return
+    guild, chan = interaction.guild, interaction.channel
+    if backups_exist(guild):
+        await interaction.response.send_message("Existing backup data found (`mas-backups`). Nothing was deleted.")
+        for _ in range(10):
+            await chan.send(WARNING)
+        await chan.send("Use `/importbackup vps:<n>` to restore it to a VPS, or `/focusbackup` to delete "
+                        "all old backup data and start from scratch.")
+        return
+    view = Confirm(interaction.user.id, "Yes, wipe everything", "Cancel")
+    await interaction.response.send_message(
+        "⚠ This deletes **every channel** and kicks **every member** except the owner and this bot. Continue?",
+        view=view)
+    await view.wait()
+    if not view.ok:
+        return
+    await wipe_guild(guild, keep=chan)
+    nums = vps_numbers()
+    if not nums:
+        await chan.send("Server cleaned. No VPS added yet - use `/vps add`.")
+        return
+    ask = Confirm(interaction.user.id, "Yes, backup whole VPS now", "Later")
+    await chan.send(f"Server cleaned. Backup the whole VPS now? (vps {', '.join(map(str, nums))})", view=ask)
+    await ask.wait()
+    if ask.ok:
+        await backup_job(interaction.client, chan, guild, nums)
+    else:
+        await chan.send("Okay - run `/backup` whenever you're ready.")
+
+
+vps_group = app_commands.Group(name="vps", description="Manage VPS backups")
+
+
+@vps_group.command(name="add", description="Add a VPS (opens a form)")
+async def cmd_vps_add(interaction: discord.Interaction):
+    if await guard(interaction):
+        await interaction.response.send_modal(VpsAddModal())
+
+
+@app_commands.command(name="backup", description="Back up a VPS now (0 = all)")
+async def cmd_backup(interaction: discord.Interaction, vps: int = 0):
+    if not await guard(interaction):
+        return
+    nums = vps_numbers() if vps == 0 else [vps]
+    if not nums or any(not vps_file(n).exists() for n in nums):
+        await interaction.response.send_message("No such VPS. Use `/vps add` first.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"Starting backup of vps {', '.join(map(str, nums))}...")
+    await backup_job(interaction.client, interaction.channel, interaction.guild, nums)
+
+
+@app_commands.command(name="importbackup", description="Restore backed-up files from Discord onto a VPS")
+async def cmd_import(interaction: discord.Interaction, vps: int):
+    if not await guard(interaction):
+        return
+    if not backups_exist(interaction.guild) or not vps_file(vps).exists():
+        await interaction.response.send_message("No backup found, or that VPS isn't added.", ephemeral=True)
+        return
+    view = Confirm(interaction.user.id, "Restore (overwrites files)", "Cancel")
+    await interaction.response.send_message(
+        f"⚠ This reads `{RECORDS}` and **overwrites** matching files on vps-{vps}. Continue?", view=view)
+    await view.wait()
+    if not view.ok:
+        return
+    bot = interaction.client
+    async with bot.lock:
+        try:
+            await run_import(interaction.guild, vps, Status(interaction.channel, f"vps-{vps}"))
+        except Exception as e:  # noqa: BLE001
+            log.exception("import failed: %s", e)
+            await interaction.channel.send(f"❌ Import failed: `{e}` (see console)")
+
+
+@app_commands.command(name="focusbackup", description="Delete ALL old backup data and back up from scratch")
+async def cmd_focus(interaction: discord.Interaction):
+    if not await guard(interaction):
+        return
+    view = Confirm(interaction.user.id, "Delete old backups + restart", "Cancel")
+    await interaction.response.send_message(
+        "⚠ This **permanently deletes all existing backup data** and starts over. Continue?", view=view)
+    await view.wait()
+    if not view.ok:
+        return
+    guild, chan = interaction.guild, interaction.channel
+    for cat in list(guild.categories):
+        if cat.name == SYSTEM_CAT or re.fullmatch(r"vps-\d+(-\d+)?", cat.name):
+            for ch in list(cat.channels):
+                if ch.id != chan.id:
+                    await ch.delete(reason="focusbackup")
+            await cat.delete(reason="focusbackup")
+    for n in vps_numbers():
+        state_file(n).unlink(missing_ok=True)
+    await chan.send("Old backups deleted. Starting from scratch...")
+    await backup_job(interaction.client, chan, guild, vps_numbers())
+
+
+# ------------------------------------------------------------------ bot
+class Bot(discord.Client):
+    def __init__(self, cfg: dict):
+        intents = discord.Intents.default()
+        intents.members = True                      # privileged: enable in the Developer Portal
+        super().__init__(intents=intents)
+        self.cfg = cfg
+        self.tree = app_commands.CommandTree(self)
+        self.lock = asyncio.Lock()
+        self.gid = int(cfg["guild_id"])
+
+    async def setup_hook(self):
+        g = discord.Object(id=self.gid)
+        for c in (cmd_setup, vps_group, cmd_backup, cmd_import, cmd_focus):
+            self.tree.add_command(c, guild=g)
+        await self.tree.sync(guild=g)
+        if float(self.cfg.get("interval_hours", 0)) > 0:
+            asyncio.create_task(self.auto_loop())
+
+    async def on_ready(self):
+        log.info("Bot online as %s", self.user)
+        for g in self.guilds:
+            if g.id != self.gid:
+                log.warning("leaving unexpected server %s", g.name)
+                await g.leave()
+
+    async def on_member_join(self, member: discord.Member):
+        if member.guild.id != self.gid or member.id in allowed_ids(member.guild):
+            return
+        try:
+            await member.kick(reason="MAS backup server is private")
+            log.info("kicked joiner %s", member)
+        except Exception as e:  # noqa: BLE001
+            log.error("could not kick joiner %s: %s", member, e)
+
+    async def auto_loop(self):
+        await self.wait_until_ready()
+        hours = float(self.cfg["interval_hours"])
+        while not self.is_closed():
+            await asyncio.sleep(hours * 3600)
+            guild = self.get_guild(self.gid)
+            ch = guild and (discord.utils.get(guild.text_channels, name=CONTROL) or discord.utils.get(guild.text_channels, name=MARKER))
+            if guild and ch and backups_exist(guild) and vps_numbers():
+                await backup_job(self, ch, guild, vps_numbers())
+
+
+# ------------------------------------------------------------------ CLI
+def client_id_from_token(token: str) -> int:
+    part = token.split(".")[0]
+    return int(base64.b64decode(part + "=" * (-len(part) % 4)).decode())
+
+
+class WipeClient(discord.Client):
+    def __init__(self, gid: int):
+        intents = discord.Intents.default()
+        intents.members = True
+        super().__init__(intents=intents)
+        self.gid, self.code = gid, 1
+
+    async def on_ready(self):
+        try:
+            guild = self.get_guild(self.gid)
+            if guild is None:
+                log.error("The bot is not in that server. Invite it first (option 1 prints the link).")
+                return
+            await wipe_guild(guild)
+            ch = await guild.create_text_channel(CONTROL, topic="Run /setup here after adding a VPS (option 2).")
+            log.info("Server is clean and private. Control channel: #%s", ch.name)
+            self.code = 0
+        except Exception as e:  # noqa: BLE001
+            log.exception("wipe failed: %s", e)
+        finally:
+            await self.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", choices=["set-token", "set-guild", "invite", "wipe", "add-vps", "run"])
+    args = ap.parse_args()
+    setup_logging()
+    cfg = load_cfg()
+
+    if args.cmd == "set-token":
+        token = os.environ.get("MAS_TOKEN", "").strip()
+        try:
+            client_id_from_token(token)
+        except Exception:  # noqa: BLE001
+            log.error("That doesn't look like a bot token.")
+            return 1
+        cfg["token"] = token
+        save_cfg(cfg)
+        log.info("Token saved to %s (chmod 600).", CONFIG)
+        return 0
+
+    if args.cmd == "set-guild":
+        cfg["guild_id"] = int(os.environ["MAS_GUILD"])
+        save_cfg(cfg)
+        return 0
+
+    if "token" not in cfg:
+        log.error("No bot token configured. Use menu option 1.")
+        return 1
+
+    if args.cmd == "invite":
+        perms = discord.Permissions(
+            view_channel=True, send_messages=True, embed_links=True, attach_files=True,
+            read_message_history=True, manage_channels=True, manage_guild=True,
+            manage_roles=True, kick_members=True)
+        print(discord.utils.oauth_url(client_id_from_token(cfg["token"]), permissions=perms,
+                                      scopes=("bot", "applications.commands")))
+        return 0
+
+    if args.cmd == "add-vps":
+        v = {"host": os.environ["MAS_V_HOST"], "port": int(os.environ["MAS_V_PORT"]),
+             "user": os.environ["MAS_V_USER"], "password": os.environ["MAS_V_PASS"]}
+        try:
+            asyncio.run(test_ssh(v))
+        except Exception as e:  # noqa: BLE001
+            log.error("SSH connection failed: %s", e)
+            return 1
+        n = next_vps_number()
+        save_vps(n, v)
+        print(n)
+        return 0
+
+    if "guild_id" not in cfg:
+        log.error("No server configured. Use menu option 1.")
+        return 1
+
+    try:
+        if args.cmd == "wipe":
+            c = WipeClient(int(cfg["guild_id"]))
+            c.run(cfg["token"], log_handler=None)
+            return c.code
+        Bot(cfg).run(cfg["token"], log_handler=None)
+    except discord.LoginFailure:
+        log.error("Discord rejected the bot token.")
+        return 1
+    except discord.PrivilegedIntentsRequired:
+        log.error("Enable 'Server Members Intent' in the Developer Portal (Bot tab).")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+MAS_BOT_EOF
+}
+
+ensure_env() {
+  mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
+  command -v python3 >/dev/null || { err "python3 is required (apt install python3 python3-venv)"; return 1; }
+  if [[ ! -x "$PY" ]]; then
+    echo "  Creating Python environment..."
+    python3 -m venv "$DATA_DIR/venv" || { err "Could not create venv (apt install python3-venv)"; return 1; }
+  fi
+  if ! "$PY" -c "import discord, asyncssh" 2>/dev/null; then
+    echo "  Installing discord.py + asyncssh..."
+    "$DATA_DIR/venv/bin/pip" install -q -U discord.py asyncssh || { err "pip install failed"; return 1; }
+  fi
+  write_bot
+  return 0
+}
+
+start_bot() {
+  if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1; then
+    cat > /etc/systemd/system/mas-backup-bot.service <<UNIT
+[Unit]
+Description=MAS Auto Backup Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=MAS_DATA_DIR=$DATA_DIR
+ExecStart=$PY $BOT run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable mas-backup-bot >/dev/null 2>&1
+    systemctl restart mas-backup-bot
+    ok "Bot is online (systemd service: mas-backup-bot)"
+    echo "  Console/errors:  journalctl -u mas-backup-bot -f"
+  else
+    [[ -f "$PIDFILE" ]] && kill "$(cat "$PIDFILE")" 2>/dev/null
+    nohup "$PY" "$BOT" run >> "$LOG" 2>&1 &
+    echo $! > "$PIDFILE"
+    ok "Bot is online (pid $(cat "$PIDFILE"))"
+    echo "  Console/errors:  tail -f $LOG"
+  fi
+}
+
+bot_status() {
+  header "Bot Status"
+  if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q mas-backup-bot; then
+    systemctl --no-pager status mas-backup-bot | head -n 12
+  elif [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    ok "Running (pid $(cat "$PIDFILE"))"
+  else
+    warn "Bot is not running."
+  fi
+  echo
+  echo "  Last log lines:"
+  [[ -f "$LOG" ]] && tail -n 15 "$LOG" | sed 's/^/    /'
+  pause
+}
+
+# ---------------------------------------------------------------- 1) Setup Discord bot
+setup_discord_bot() {
+  header "Setup Discord Bot"
+  ensure_env || { pause; return; }
+
+  echo "  1) Go to https://discord.com/developers/applications"
+  echo "  2) Create an app -> Bot tab -> enable ${BOLD}Server Members Intent${RST}"
+  echo "  3) Copy the bot token"
+  echo
+  read -rsp "  Bot token: " token; echo
+  [[ -z "$token" ]] && { err "No token entered."; pause; return; }
+  MAS_TOKEN="$token" "$PY" "$BOT" set-token || { pause; return; }
+  unset token
+
+  echo
+  echo "  Invite the bot to your ${BOLD}backup-only${RST} server with this link"
+  echo "  (it already contains the required permissions):"
+  echo
+  "$PY" "$BOT" invite
+  echo
+  echo "  After it joins, drag the bot's role to the TOP of the role list"
+  echo "  (Server Settings -> Roles) so it is allowed to remove members."
+  echo
+  read -rp "  Press Enter once the bot has joined the server..." _
+
+  read -rp "  Server ID (17-20 digits): " gid
+  if ! [[ "$gid" =~ ^[0-9]{17,20}$ ]]; then
+    err "That doesn't look like a Discord server ID."; pause; return
+  fi
+
+  echo
+  echo "  ${RED}${BOLD}⚠ WARNING${RST}"
+  echo "  This server will be ${BOLD}WIPED${RST}:"
+  echo "    • every member except you (the owner) and the bot is removed"
+  echo "    • every channel and category is deleted"
+  echo "    • the server is made private (invites removed, anyone who joins is kicked)"
+  echo "  The server may become useless for anything else. Only use a server"
+  echo "  that exists ${BOLD}only for backups${RST}."
+  echo
+  read -rp "  Type the server ID again to confirm: " again
+  if [[ "$again" != "$gid" ]]; then
+    warn "IDs did not match. Cancelled, nothing was changed."; pause; return
+  fi
+
+  MAS_GUILD="$gid" "$PY" "$BOT" set-guild || { pause; return; }
+  if "$PY" "$BOT" wipe; then
+    echo
+    start_bot      # keeps the server private: anyone who joins gets kicked
+  fi
+  pause
+}
+
+# ---------------------------------------------------------------- 2) Setup LVIB
+setup_lvib() {
+  header "Setup LVIB"
+  ensure_env || { pause; return; }
+  if ! grep -q '"guild_id"' "$DATA_DIR/config.json" 2>/dev/null; then
+    err "Run option 1 (Setup Discord bot) first."; pause; return
+  fi
+
+  echo "  LVIB = Load VPS Into Bot. Enter SSH access for the VPS to back up."
+  echo
+  read -rp  "  VPS IP / host: " host
+  read -rp  "  SSH port [22]: " port; port="${port:-22}"
+  read -rp  "  Username [root]: " user; user="${user:-root}"
+  read -rsp "  Password: " pass; echo
+  [[ -z "$host" || -z "$pass" ]] && { err "Host and password are required."; pause; return; }
+
+  echo "  Testing SSH connection..."
+  num="$(MAS_V_HOST="$host" MAS_V_PORT="$port" MAS_V_USER="$user" MAS_V_PASS="$pass" "$PY" "$BOT" add-vps)" \
+    || { err "Could not add VPS (see error above)."; pause; return; }
+  unset pass
+
+  ok "Created $DATA_DIR/vps${num}.itzmasgaming"
+  start_bot
+  echo
+  echo "  Next: in your Discord backup server, run  ${BOLD}/setup${RST}"
+  echo "  More VPS later:  ${BOLD}/vps add${RST}"
+  pause
+}
+
+# ---------------------------------------------------------------- Auto Backup menu
+auto_backup_menu() {
+  while true; do
+    header "Auto Backup"
+    echo "  ${AQUA}❯${RST} 1 Setup Discord bot"
+    echo "  ${AQUA}❯${RST} 2 Setup LVIB (Load VPS into bot)"
+    echo "  ${AQUA}❯${RST} 3 Bot status / logs"
+    echo "  ${AQUA}❯${RST} 4 Coming soon"
+    echo "  ${AQUA}❯${RST} 0 Back"
+    echo
+    read -rp "  Select an option: " choice
+    case "$choice" in
+      1) setup_discord_bot ;;
+      2) setup_lvib ;;
+      3) bot_status ;;
+      4) echo "  Coming soon..."; sleep 1 ;;
+      0) return ;;
+      *) err "Invalid option"; sleep 1 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------- Main menu
+while true; do
+  header "Main Menu"
+  echo "  ${AQUA}❯${RST} 1 Auto Backup"
+  echo "  ${AQUA}❯${RST} 2 Coming soon"
+  echo "  ${AQUA}❯${RST} 0 Exit"
+  echo
+  read -rp "  Select an option: " choice
+  case "$choice" in
+    1) auto_backup_menu ;;
+    2) echo "  Coming soon..."; sleep 1 ;;
+    0) clear; exit 0 ;;
+    *) err "Invalid option"; sleep 1 ;;
+  esac
+done
