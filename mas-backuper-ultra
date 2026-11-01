@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
-# Run with:  bash <(curl -fsSL https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-discord-bot-backuper.txt)
+# Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.1.1"
-MAS_UPDATED="2026-11-01 05:59 UTC"
+MAS_VERSION="6.1.2"
+MAS_UPDATED="2026-11-01 06:06 UTC"
 MAS_REPO="itzmasgaming/gui"
-MAS_FILE="mas-discord-bot-backuper.txt"
+MAS_FILE="mas-backuper-ultra"
 
 AQUA=$'\e[38;5;51m'; RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BOLD=$'\e[1m'; RST=$'\e[0m'
 W=48
@@ -87,8 +87,8 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.1.1"
-UPDATED = "2026-11-01 05:59 UTC"
+VERSION = "6.1.2"
+UPDATED = "2026-11-01 06:06 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -1545,7 +1545,17 @@ if __name__ == "__main__":
 MAS_BOT_EOF
 }
 
-SELF_URL="${MAS_SELF_URL:-https://raw.githubusercontent.com/$MAS_REPO/main/$MAS_FILE}"
+# where the latest copy of this script lives (first one that works is used)
+SELF_URL="${MAS_SELF_URL:-https://itzmasgaming.github.io/gui/$MAS_FILE}"
+FALLBACK_URL="${MAS_FALLBACK_URL:-https://raw.githubusercontent.com/$MAS_REPO/main/$MAS_FILE}"
+
+fetch_latest() {   # fetch_latest <output-file>
+  local u
+  for u in "$SELF_URL" "$FALLBACK_URL"; do
+    curl -fsSL --max-time 20 "$u?$(date +%s)" -o "$1" 2>/dev/null && [[ -s "$1" ]] && return 0
+  done
+  return 1
+}
 
 run_quiet() {   # run a command, keep its output in install.log, show the tail only on failure
   mkdir -p "$DATA_DIR"
@@ -1878,8 +1888,8 @@ update_bot() {
 
   echo "  Downloading the latest bot code..."
   tmp="$(mktemp)"; new="$(mktemp)"
-  if ! curl -fsSL "$SELF_URL?$(date +%s)" -o "$tmp"; then
-    err "Download failed: $SELF_URL"
+  if ! fetch_latest "$tmp"; then
+    err "Download failed. Tried: $SELF_URL  and  $FALLBACK_URL"
     rm -f "$tmp" "$new"
     [[ $was_running -eq 1 ]] && start_bot
     pause; return
@@ -1955,8 +1965,10 @@ show_version() {
   if [[ -n "$bot_ver" ]]; then echo "    Bot  : v$bot_ver"; else echo "    Bot  : not installed yet (use option 1)"; fi
   echo
   echo "  Checking GitHub for the latest version..."
-  local remote
-  remote="$(curl -fsSL --max-time 10 "$SELF_URL?$(date +%s)" 2>/dev/null)"
+  local remote rtmp
+  rtmp="$(mktemp)"
+  fetch_latest "$rtmp" && remote="$(cat "$rtmp")"
+  rm -f "$rtmp"
   latest_ver="$(printf '%s\n' "$remote" | grep -m1 '^MAS_VERSION=' | cut -d'"' -f2)"
   latest_date="$(printf '%s\n' "$remote" | grep -m1 '^MAS_UPDATED=' | cut -d'"' -f2)"
   # the commit time on GitHub is the real "last updated" moment, when it can be read
