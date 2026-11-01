@@ -17,26 +17,7 @@ BOT="$DATA_DIR/mas_backup_bot.py"
 LOG="$DATA_DIR/bot.log"
 PIDFILE="$DATA_DIR/bot.pid"
 
-center() {
-  local t="$1" pad l r
-  pad=$(( W - ${#t} )); l=$(( pad / 2 )); r=$(( pad - l ))
-  printf '┃%*s%s%*s┃\n' "$l" '' "$t" "$r" ''
-}
-
-header() {
-  local sub="$1" line
-  line="$(printf '━%.0s' $(seq 1 $W))"
-  command -v clear >/dev/null 2>&1 && clear || printf '\033c'
-  echo
-  echo "${AQUA}┏${line}┓"
-  center ""
-  center "◆ MAS GUI ◆"
-  center "$sub"
-  center "v6.0"
-  center ""
-  echo "┗${line}┛${RST}"
-  echo
-}
+header() { main_header "$1"; }    # every screen uses the same boxed header (see main_header below)
 
 # ---- Main-menu look (boxed header + icon menu) ----------------------------------
 MM_BOX=$'\e[38;5;167m'      # red frame
@@ -54,23 +35,23 @@ mm_row() {   # mm_row <plain text> <colour> [visible-length]  (centres, then col
 }
 
 main_header() {
-  local line
+  local line sub="${1:-$MM_SUBTITLE}"
   line="$(printf '━%.0s' $(seq 1 $MM_W))"
   command -v clear >/dev/null 2>&1 && clear || printf '\033c'
   echo
   echo " ${MM_BOX}┏${line}┓${RST}"
   printf ' '; mm_row "" ""
   printf ' '; mm_row "◆ MAS GUI ◆" "$BOLD$MM_TITLE" 11
-  printf ' '; mm_row "$MM_SUBTITLE" "$MM_SUB"
-  printf ' '; mm_row "ITZMAS GAMING" "$MM_ORG"
+  printf ' '; mm_row "$sub" "$MM_SUB"
+  printf ' '; mm_row "ItzMASGaming" "$MM_ORG"
   printf ' '; mm_row "v$MAS_VERSION" "$BOLD"
   printf ' '; mm_row "" ""
   echo " ${MM_BOX}┗${line}┛${RST}"
   echo
 }
 
-mm_item() {   # mm_item <number> <icon> <label> [label-colour] [number-colour]
-  printf '  %s❯%s %s%-2s%s %s %s%s%s\n' "$MM_TITLE" "$RST" "${5:-$MM_NUM}" "$1" "$RST" "$2" "${4:-}" "$3" "$RST"
+mm_item() {   # mm_item <number> <icon> <label> [label-colour] [number-colour]   ->   ❯ 1) 💾 Auto Backup
+  printf '  %s❯%s %s%s)%s %s %s%s%s\n' "$MM_TITLE" "$RST" "${5:-$MM_NUM}" "$1" "$RST" "$2" "${4:-}" "$3" "$RST"
 }
 
 mm_prompt() {  # prints the prompt, caller does the read
@@ -80,7 +61,7 @@ mm_prompt() {  # prints the prompt, caller does the read
 err()   { echo "  ${RED}✖ $*${RST}"; }
 ok()    { echo "  ${GRN}✔ $*${RST}"; }
 warn()  { echo "  ${YLW}⚠ $*${RST}"; }
-pause() { echo; read -rp "  Press Enter to continue..." _; }
+pause() { echo; read -rp "  ${MM_SUB}Press Enter to continue...${RST} " _; }
 
 # The Discord bot lives inside this file and is written to disk when needed.
 write_bot() {
@@ -270,7 +251,63 @@ def save_state(n: int, st: dict) -> None:
 
 
 # ------------------------------------------------------------------ ssh + local access
+UPTERM_HOST = "uptermd.upterm.dev"
+UPTERM_KEY = DATA_DIR / "upterm_key"      # the bot's own key: only it may join a VPS's Upterm session
+UPTERM_URL = "https://github.com/owenthereal/upterm/releases/latest/download"
+
+
+def upterm_pubkey() -> str:
+    """The bot's public key (made once). It goes into the command the VPS owner runs, so ONLY this bot can join."""
+    if not UPTERM_KEY.exists():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        fd = os.open(UPTERM_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key.export_private_key())
+        os.chmod(UPTERM_KEY, 0o600)
+    pub = asyncssh.read_private_key(str(UPTERM_KEY)).export_public_key().decode().split()
+    return f"{pub[0]} {pub[1]} mas-bot"
+
+
+def upterm_command() -> str:
+    """The one command the VPS owner pastes on the VPS: installs Upterm, starts a background session, prints the ssh line."""
+    return ("ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); mkdir -p ~/.mas && "
+            f"curl -fsSL {UPTERM_URL}/upterm_linux_$ARCH.tar.gz | tar xz -C ~/.mas upterm && "
+            f"echo '{upterm_pubkey()}' > ~/.mas/bot.pub && "
+            "~/.mas/upterm host --accept --detach --skip-host-key-check --authorized-keys ~/.mas/bot.pub -- sh")
+
+
+def parse_upterm(text: str) -> tuple[str, str, int]:
+    """Pull (token, host, port) out of whatever the person pasted: the `ssh TOKEN@host [-p N]` line, the whole
+    output of the command, an ssh:// link, or a bare TOKEN@host."""
+    t = text.replace("`", " ").replace("➤", " ")
+    m = re.search(r"(?<![\w/])ssh\s+(?:-\S+\s+)*([^\s@/]+)@([A-Za-z0-9.\-]+)(?::(\d+))?(?:\s+-p\s*(\d+))?", t)
+    if not m:
+        m = re.search(r"ssh://([^\s@/]+)@([A-Za-z0-9.\-]+)(?::(\d+))?()", t)
+    if not m:
+        m = re.search(r"(?<![\w/])([A-Za-z0-9+/=_:\-]{8,})@([A-Za-z0-9.\-]+)(?::(\d+))?()", t)
+    if not m:
+        raise ValueError("I couldn't find an `ssh TOKEN@host` line in what you pasted.")
+    token, host = m.group(1), m.group(2)
+    port = int(m.group(3) or m.group(4) or 22)
+    if not 0 < port < 65536:
+        raise ValueError("That port number isn't valid.")
+    return token, host, port
+
+
+def remote_label(v: dict, port: bool = False) -> str:
+    """Short 'where is this VPS' text. An Upterm VPS never shows its token."""
+    if v.get("upterm"):
+        return f"Upterm tunnel ({v.get('host', UPTERM_HOST)})"
+    return str(v.get("user", "?")) + "@" + str(v.get("host", "?")) + (":" + str(v.get("port", 22)) if port else "")
+
+
 async def ssh_connect(v: dict):
+    if v.get("upterm"):          # key login to the Upterm relay; the "user" is the session token
+        return await asyncio.wait_for(asyncssh.connect(
+            v.get("host", UPTERM_HOST), port=int(v.get("port", 22)), username=v["user"],
+            client_keys=[str(UPTERM_KEY)], known_hosts=None, keepalive_interval=30,
+            preferred_auth="publickey"), 25)
     # known_hosts=None disables host-key checking (simple, but open to MITM).
     return await asyncssh.connect(
         v["host"], port=int(v.get("port", 22)), username=v.get("user", "root"),
@@ -282,6 +319,100 @@ async def test_ssh(v: dict) -> None:
     conn = await ssh_connect(v)
     conn.close()
     await conn.wait_closed()
+
+
+_UPTERM_LOCK = asyncio.Lock()
+
+
+async def upterm_exec(conn, script: str, timeout: float = 60, limit: int = 60000, flags: dict | None = None) -> bytes:
+    """Upterm gives every guest the host's ONE shared shell: it cannot run a command per call.
+    So the script is typed into that shell (base64, short lines), run from a temp file, and its output is cut out
+    between two markers. It never types `exit`, that would end the shared session. Returns the script's output."""
+    flags = flags if flags is not None else {}
+    nonce = os.urandom(5).hex()
+    tmp = f"/tmp/.mas-{nonce}"
+    b64 = base64.b64encode(script.encode()).decode()
+    buf = bytearray()
+    async with _UPTERM_LOCK:                       # one shared shell = one job at a time
+        proc = await conn.create_process(term_type="dumb", request_pty="force", encoding=None)
+
+        def send(text: str) -> None:
+            proc.stdin.write(text.encode())
+
+        async def pump() -> None:
+            try:
+                while True:
+                    chunk = await proc.stdout.read(4096)
+                    if not chunk:
+                        return
+                    buf.extend(chunk)
+            except Exception:  # noqa: BLE001
+                return
+
+        reader = asyncio.create_task(pump())
+        begin = re.compile(rb"(?<![%\w])__MAS_BEGIN_" + nonce.encode() + rb"\r?\n")
+        end = re.compile(rb"__MAS_END_" + nonce.encode() + rb"_(\d+)")
+        try:
+            # 1) quiet the terminal (no echo, no prompt) and wait for the BEGIN marker
+            send("stty -echo 2>/dev/null; PS1=; PS2=; printf '__MAS_BEGIN_%s\\n' " + nonce + "\n")
+            t_end = time.monotonic() + 15
+            mb = None
+            while time.monotonic() < t_end and mb is None and not reader.done():
+                mb = begin.search(bytes(buf))
+                await asyncio.sleep(0.05)
+            if mb is None:
+                raise RuntimeError("the Upterm session did not answer (is `upterm host` still running on the VPS?)")
+            mark = mb.end()
+            # 2) send the script in short lines, run it, print the END marker
+            for i in range(0, len(b64), 800):
+                send(f"printf %s '{b64[i:i + 800]}' >> {tmp}.b64\n")
+            send(f"base64 -d {tmp}.b64 > {tmp}.sh 2>/dev/null; rm -f {tmp}.b64; "
+                 f"if command -v bash >/dev/null 2>&1; then bash {tmp}.sh </dev/null 2>&1; else sh {tmp}.sh </dev/null 2>&1; fi; "
+                 f"__r=$?; rm -f {tmp}.sh; printf '\\n__MAS_END_%s_%s\\n' {nonce} \"$__r\"\n")
+            t_end = time.monotonic() + timeout
+            m = None
+            while time.monotonic() < t_end:
+                if len(buf) - mark > limit:
+                    flags["cut"] = True
+                    break
+                m = end.search(bytes(buf), mark)
+                if m or reader.done():
+                    break
+                await asyncio.sleep(0.05)
+            if m is None:
+                if not flags.get("cut"):
+                    flags["timeout"] = True
+                send("\x03")                        # Ctrl-C the running script, then tidy up
+                await asyncio.sleep(1)
+                send(f"rm -f {tmp}.b64 {tmp}.sh\n")
+                await asyncio.sleep(0.5)
+                m = end.search(bytes(buf), mark)
+            data = bytes(buf)[mark:(m.start() if m else len(buf))]
+            return data.replace(b"\r\n", b"\n")[:limit]
+        finally:
+            reader.cancel()
+            proc.close()
+
+
+async def test_upterm(v: dict) -> dict:
+    """Connects to the Upterm session and checks the two things the bot needs: files (SFTP) and commands."""
+    conn = await ssh_connect(v)
+    res = {"sftp": False, "shell": False}
+    try:
+        try:
+            async with conn.start_sftp_client() as sftp:
+                await sftp.listdir("/")
+                res["sftp"] = True
+        except Exception as e:  # noqa: BLE001
+            log.warning("upterm sftp test failed: %s", e)
+        try:
+            res["shell"] = b"MAS_OK" in await upterm_exec(conn, "echo MAS_OK", 25)
+        except Exception as e:  # noqa: BLE001
+            log.warning("upterm shell test failed: %s", e)
+    finally:
+        conn.close()
+        await conn.wait_closed()
+    return res
 
 
 class _Attrs:
@@ -926,7 +1057,7 @@ def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) ->
         color=discord.Color(0x00E5FF if clean else 0xF1C40F),
         timestamp=discord.utils.utcnow(),
     )
-    where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+    where = "this machine" if v.get("local") else remote_label(v)
     speed = s["bytes"] / elapsed if elapsed > 0 else 0
     e.add_field(name="📁 Files saved", value=f"{s['ok']:,}", inline=True)
     e.add_field(name="⏭️ Unchanged", value=f"{s['skipped']:,}", inline=True)
@@ -984,7 +1115,7 @@ def restore_embed(vps_n: int, v: dict, prog: dict, nbytes: int, elapsed: float, 
                 f"**vps-{vps_n}** was restored, but some files failed. Details are in the bot console/log.")
     e = discord.Embed(title=f"{'✅' if clean else '⚠️'}  {name}", description=desc,
                       color=discord.Color(0x2ECC71 if clean else 0xF1C40F), timestamp=discord.utils.utcnow())
-    where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+    where = "this machine" if v.get("local") else remote_label(v)
     speed = nbytes / elapsed if elapsed > 0 else 0
     e.add_field(name="📁 Restored", value=f"{prog['ok']:,} / {total:,}", inline=True)
     e.add_field(name="❌ Failed", value=f"{prog['failed']:,}", inline=True)
@@ -1250,6 +1381,140 @@ class Confirm(discord.ui.View):
         await self._done(i, False, "✖ Cancelled")
 
 
+async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, login_text: str) -> None:
+    """Shared last step of every way to add a VPS (IP + password, or Upterm)."""
+    guild = interaction.guild
+    if vps_has_data(guild, n):
+        await (await ensure_talk(guild)).send(embed=ui(
+            "warn", f"VPS-{n} added - waiting for your choice",
+            f"A `vps-{n}` category with old backup data already exists.",
+            [("🛟 Restore it onto this VPS", f"`/importbackup vps:{n}`", True),
+             ("🗑️ Delete it and start fresh", f"`/focusbackup vps:{n}`", True)]))
+        await interaction.followup.send(embed=ui("ok", f"VPS-{n} added", f"{login_text} See the message above."),
+                                        ephemeral=True)
+    else:
+        await ensure_category(guild, n)
+        await records_channel(guild, n)
+        v["synced"] = True            # nothing old to decide about: first backup can start
+        save_vps(n, v)
+        await interaction.followup.send(embed=ui(
+            "ok", f"VPS-{n} added", f"{login_text} The VPS is ready for its first backup.",
+            [("▶️ Start the backup", f"`/backup vps:{n}`", True),
+             ("📊 See its details", f"`/info-vps number:{n}`", True)]), ephemeral=True)
+
+
+def add_method_embed() -> discord.Embed:
+    return ui("info", "Add a VPS - how should I connect?",
+              "Pick the way that fits your VPS:",
+              [("🌐 IP + password", "The VPS has a public IP and you know its SSH port, user and password."),
+               ("🔌 Upterm (SSH replacement)", "The VPS has **no public IP / IPv4**, or you can't open an SSH port. "
+                                              "The VPS connects out, and you just paste one `ssh …` line.")])
+
+
+def upterm_embed() -> discord.Embed:
+    return ui("info", "🔌 Upterm (SSH replacement)",
+              "For a VPS **without a public IP / IPv4**. The VPS connects *out* to a free relay, and you get an "
+              "`ssh …` line the bot can use instead of an IP. No account needed.\n\n"
+              "**1️⃣** Open a terminal on your VPS (your host's web console works).\n"
+              "**2️⃣** Paste this command and press Enter:\n"
+              f"```bash\n{upterm_command()}\n```\n"
+              "**3️⃣** It prints a few lines. Copy the line that starts with **`ssh`**.\n"
+              "**4️⃣** Press **Enter SSH** below and paste it.",
+              [("🔒 Is it safe?", "The command contains this bot's key, so **only this bot** can use the link.", True),
+               ("♻️ VPS rebooted?", "Run the command again, press Enter SSH and use the **same VPS number** to update it.", True),
+               ("📋 Needs", "`curl` and `tar` on the VPS. Works as root or a normal user.", True)])
+
+
+class AddMethodView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="IP + password", emoji="🌐", style=discord.ButtonStyle.primary)
+    async def ip_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(VpsAddModal())
+
+    @discord.ui.button(label="Upterm (SSH replacement)", emoji="🔌", style=discord.ButtonStyle.success)
+    async def upterm_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=upterm_embed(), view=UptermView(self.owner_id))
+
+
+class UptermView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=1800)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Enter SSH", emoji="⌨️", style=discord.ButtonStyle.success)
+    async def enter_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(UptermModal())
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=add_method_embed(), view=AddMethodView(self.owner_id))
+
+
+class UptermModal(discord.ui.Modal, title="Enter SSH"):
+    ssh = discord.ui.TextInput(label="The ssh line from your VPS", style=discord.TextStyle.paragraph,
+                               placeholder="ssh AbCdEf123...@uptermd.upterm.dev", max_length=700)
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            token, host, port = parse_upterm(self.ssh.value)
+            updating = vps_file(n).exists()
+            if updating:
+                v = load_vps(n)
+                if not v.get("upterm"):
+                    raise ValueError(f"vps{n} already exists and doesn't use Upterm. Pick a free number (see `/nodes`).")
+                v.update({"host": host, "port": port, "user": token})
+            else:
+                v = {"upterm": True, "host": host, "port": port, "user": token, "vps": n}
+            try:
+                res = await test_upterm(v)
+            except asyncssh.PermissionDenied:
+                raise ValueError("Upterm didn't accept that link. Check that you copied the **whole `ssh …` line**, "
+                                 "that you pasted the command **exactly as shown** (it holds the bot's key), and that the "
+                                 "session is still running on the VPS.") from None
+            if not res["sftp"] and not res["shell"]:
+                raise ValueError("Connected, but the VPS didn't answer. Run the command on the VPS again and use the new `ssh …` line.")
+            note = ""
+            if not res["sftp"]:
+                note = "⚠️ Commands work, but **file access (SFTP) didn't**, so backups can't run on this VPS."
+            elif not res["shell"]:
+                note = "⚠️ Files work (backups are fine), but **running commands didn't** (`/access`, `/info-vps`)."
+            save_vps(n, v)
+            log.info("VPS %d %s via Upterm", n, "updated" if updating else "added")
+            if updating:
+                await interaction.followup.send(embed=ui("ok", f"VPS-{n} updated", "The new Upterm link works." + (f"\n{note}" if note else "")),
+                                                ephemeral=True)
+            else:
+                await finish_vps_add(interaction, n, v, "Upterm link works." + (f" {note}" if note else ""))
+        except Exception as e:  # noqa: BLE001
+            log.warning("upterm add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("upterm modal error: %s", error)
+
+
 class VpsAddModal(discord.ui.Modal, title="Add VPS"):
     number = discord.ui.TextInput(label="VPS number", placeholder="2", max_length=3)
     host = discord.ui.TextInput(label="VPS IP / host", placeholder="1.2.3.4", max_length=255)
@@ -1269,25 +1534,8 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
                  "user": self.user.value.strip(), "password": self.password.value, "vps": n}
             await test_ssh(v)
             save_vps(n, v)
-            guild = interaction.guild
             log.info("VPS %d added via /vps add", n)
-            if vps_has_data(guild, n):
-                await (await ensure_talk(guild)).send(embed=ui(
-                    "warn", f"VPS-{n} added - waiting for your choice",
-                    f"A `vps-{n}` category with old backup data already exists.",
-                    [("🛟 Restore it onto this VPS", f"`/importbackup vps:{n}`", True),
-                     ("🗑️ Delete it and start fresh", f"`/focusbackup vps:{n}`", True)]))
-                await interaction.followup.send(embed=ui("ok", f"VPS-{n} added", "SSH login works. See the message above."),
-                                                ephemeral=True)
-            else:
-                await ensure_category(guild, n)
-                await records_channel(guild, n)
-                v["synced"] = True            # nothing old to decide about: first backup can start
-                save_vps(n, v)
-                await interaction.followup.send(embed=ui(
-                    "ok", f"VPS-{n} added", "SSH login works. The VPS is ready for its first backup.",
-                    [("▶️ Start the backup", f"`/backup vps:{n}`", True),
-                     ("📊 See its details", f"`/info-vps number:{n}`", True)]), ephemeral=True)
+            await finish_vps_add(interaction, n, v, "SSH login works.")
         except Exception as e:  # noqa: BLE001
             log.exception("/vps add failed: %s", e)
             await interaction.followup.send(embed=ui("error", "Could not add VPS", f"```{str(e)[:500]}```"), ephemeral=True)
@@ -1326,7 +1574,7 @@ async def send_nodes(interaction: discord.Interaction) -> None:
         except Exception:  # noqa: BLE001
             continue
         where = "this machine (local)" if v.get("local") else \
-            f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
+            remote_label(v, True)
         if vps_has_data(interaction.guild, n) and not v.get("synced"):
             st = f"⏳ waiting: `/importbackup vps:{n}` or `/focusbackup vps:{n}`"
         elif v.get("last_backup"):
@@ -1389,10 +1637,11 @@ async def cmd_setup(interaction: discord.Interaction):
 vps_group = app_commands.Group(name="vps", description="Manage VPS backups")
 
 
-@vps_group.command(name="add", description="Add a VPS (opens a form)")
+@vps_group.command(name="add", description="Add a VPS (IP + password, or Upterm for VPS without a public IP)")
 async def cmd_vps_add(interaction: discord.Interaction):
     if await guard(interaction):
-        await interaction.response.send_modal(VpsAddModal())
+        await interaction.response.send_message(embed=add_method_embed(), view=AddMethodView(interaction.user.id),
+                                                ephemeral=True)
 
 
 @vps_group.command(name="list", description="Show all VPS nodes and their backup status")
@@ -1729,14 +1978,19 @@ async def fetch_live(v: dict) -> dict:
         return {"state": "offline", "ms": 0, "raw": "", "error": "connection timed out (15s)"}
     except asyncssh.PermissionDenied:
         return {"state": "auth", "ms": int((time.monotonic() - t0) * 1000), "raw": "",
-                "error": "the server answered but refused the login (user/password changed?)"}
+                "error": ("the Upterm session was not found (it stopped or restarted). Run the command on the VPS again, "
+                          "then /vps add → Upterm → Enter SSH with the same VPS number")
+                if v.get("upterm") else "the server answered but refused the login (user/password changed?)"}
     except Exception as e:  # noqa: BLE001
         return {"state": "offline", "ms": 0, "raw": "", "error": (str(e) or type(e).__name__)[:200]}
     ms = int((time.monotonic() - t0) * 1000)
     out = {"state": "online", "ms": ms, "raw": "", "error": ""}
     try:
-        res = await asyncio.wait_for(conn.run("sh -s", input=INFO_SCRIPT, check=False), 40)
-        out["raw"] = res.stdout if isinstance(res.stdout, str) else (res.stdout or b"").decode(errors="replace")
+        if v.get("upterm"):
+            out["raw"] = (await upterm_exec(conn, INFO_SCRIPT, 40)).decode(errors="replace")
+        else:
+            res = await asyncio.wait_for(conn.run("sh -s", input=INFO_SCRIPT, check=False), 40)
+            out["raw"] = res.stdout if isinstance(res.stdout, str) else (res.stdout or b"").decode(errors="replace")
     except Exception as e:  # noqa: BLE001
         out["error"] = f"could not read system info: {(str(e) or type(e).__name__)[:150]}"
     finally:
@@ -1820,7 +2074,7 @@ def usage_line(used: float, total: float) -> str:
 def build_info_embed(n: int, v: dict, live: dict, info: dict | None, bk: dict, scan: dict | None,
                      scanning: int | None, running: bool) -> discord.Embed:
     state = live.get("state", "offline")
-    where = "this machine (local)" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
+    where = "this machine (local)" if v.get("local") else remote_label(v, True)
     if state == "online":
         color, head = 0x00E5FF, "🟢 **ONLINE** • connected"
         head += " (local machine)" if v.get("local") else f" in **{live.get('ms', 0)} ms**"
@@ -1991,7 +2245,7 @@ async def cmd_info_autocomplete(interaction: discord.Interaction, current: str):
             v = load_vps(n)
         except Exception:  # noqa: BLE001
             continue
-        where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+        where = "this machine" if v.get("local") else remote_label(v)
         out.append(app_commands.Choice(name=f"vps-{n} • {where}"[:100], value=n))
     return out[:25]
 
@@ -2018,6 +2272,8 @@ async def run_script(v: dict, script: str, timeout: float = 60) -> str:
         return data.decode(errors="replace")
     conn = await asyncio.wait_for(ssh_connect(v), 15)
     try:
+        if v.get("upterm"):
+            return (await upterm_exec(conn, script, timeout, 200000)).decode(errors="replace")
         res = await asyncio.wait_for(conn.run("sh -s", input=script, check=False), timeout)
         out = res.stdout
         return out if isinstance(out, str) else (out or b"").decode(errors="replace")
@@ -2027,7 +2283,7 @@ async def run_script(v: dict, script: str, timeout: float = 60) -> str:
 
 
 def where_of(v: dict) -> str:
-    return "this machine (local)" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
+    return "this machine (local)" if v.get("local") else remote_label(v, True)
 
 
 # ------------------------------------------------------------------ /sshx
@@ -2218,6 +2474,8 @@ class TermSession:
                 await asyncio.wait_for(proc.wait(), 5)
             except asyncio.TimeoutError:
                 pass
+        elif self.v.get("upterm"):
+            out.extend(await upterm_exec(self.conn, script, timeout, limit, flags))
         else:
             inner = (f"if command -v bash >/dev/null 2>&1; then exec bash -c {shlex.quote(script)}; "
                      f"else exec sh -c {shlex.quote(script)}; fi")
@@ -2871,7 +3129,7 @@ bot_status() {
     warn "Bot is not running."
   fi
   echo
-  echo "  Last log lines:"
+  echo "  ${MM_SUB}Last log lines:${RST}"
   [[ -f "$LOG" ]] && tail -n 15 "$LOG" | sed 's/^/    /'
   pause
 }
@@ -2881,11 +3139,11 @@ setup_discord_bot() {
   header "Setup Discord Bot"
   ensure_env || { pause; return; }
 
-  echo "  1) Go to https://discord.com/developers/applications"
-  echo "  2) Create an app -> Bot tab -> enable ${BOLD}Server Members Intent${RST}"
-  echo "  3) Copy the bot token"
+  echo "  ${MM_NUM}1)${RST} Go to ${MM_SUB}https://discord.com/developers/applications${RST}"
+  echo "  ${MM_NUM}2)${RST} Create an app -> Bot tab -> enable ${BOLD}Server Members Intent${RST}"
+  echo "  ${MM_NUM}3)${RST} Copy the bot token"
   echo
-  read -rsp "  Bot token: " token; echo
+  read -rsp "  ${MM_TITLE}Bot token: ${RST}" token; echo
   [[ -z "$token" ]] && { err "No token entered."; pause; return; }
   MAS_TOKEN="$token" "$PY" "$BOT" set-token || { pause; return; }
   unset token
@@ -2899,9 +3157,9 @@ setup_discord_bot() {
   echo "  After it joins, drag the bot's role to the TOP of the role list"
   echo "  (Server Settings -> Roles) so it is allowed to remove members."
   echo
-  read -rp "  Press Enter once the bot has joined the server..." _
+  read -rp "  ${MM_TITLE}Press Enter once the bot has joined the server...${RST}" _
 
-  read -rp "  Server ID (17-20 digits): " gid
+  read -rp "  ${MM_TITLE}Server ID (17-20 digits): ${RST}" gid
   if ! [[ "$gid" =~ ^[0-9]{17,20}$ ]]; then
     err "That doesn't look like a Discord server ID."; pause; return
   fi
@@ -2941,7 +3199,7 @@ setup_discord_bot() {
   echo "    • the server is made private (invites removed, anyone who joins is kicked)"
   echo "  Only use a server that exists ${BOLD}only for backups${RST}."
   echo
-  read -rp "  Type the server ID again to confirm: " again
+  read -rp "  ${MM_TITLE}Type the server ID again to confirm: ${RST}" again
   if [[ "$again" != "$gid" ]]; then
     warn "IDs did not match. Cancelled, nothing was changed."; pause; return
   fi
@@ -2976,13 +3234,13 @@ start_bot_flow() {
     echo "  Invite link (add the bot, then choose 2):"
     "$PY" "$BOT" invite
     echo
-    echo "  ${AQUA}❯${RST} 1 Change server ID"
-    echo "  ${AQUA}❯${RST} 2 Try again"
-    echo "  ${AQUA}❯${RST} 0 Exit"
-    echo
-    read -rp "  Select an option: " c
+    mm_item 1 "🆔" "Change server ID"
+    mm_item 2 "🔁" "Try again"
+    mm_item 0 "✕" "Exit" "" "$MM_BOX"
+    mm_prompt
+    read -r c
     case "$c" in
-      1) read -rp "  New server ID (17-20 digits): " gid
+      1) read -rp "  ${MM_TITLE}New server ID (17-20 digits): ${RST}" gid
          if [[ "$gid" =~ ^[0-9]{17,20}$ ]]; then
            MAS_GUILD="$gid" "$PY" "$BOT" set-guild && ok "Server ID changed."
          else
@@ -3079,21 +3337,21 @@ update_bot() {
 auto_backup_menu() {
   while true; do
     header "Auto Backup"
-    echo "  ${AQUA}❯${RST} 1 Setup Discord bot"
-    echo "  ${AQUA}❯${RST} 2 Setup LVIB (Load VPS into bot)"
-    echo "  ${AQUA}❯${RST} 3 Bot status / logs"
-    echo "  ${AQUA}❯${RST} 4 Coming soon"
-    echo "  ${AQUA}❯${RST} 5 Start bot"
-    echo "  ${AQUA}❯${RST} 6 Stop bot"
-    echo "  ${AQUA}❯${RST} 7 Update bot"
-    echo "  ${AQUA}❯${RST} 0 Back"
-    echo
-    read -rp "  Select an option: " choice
+    mm_item 1 "🤖" "Setup Discord bot"
+    mm_item 2 "📥" "Setup LVIB (Load VPS into bot)"
+    mm_item 3 "📜" "Bot status / logs"
+    mm_item 4 "🚧" "Coming soon"
+    mm_item 5 "🚀" "Start bot"
+    mm_item 6 "🛑" "Stop bot"
+    mm_item 7 "🔄" "Update bot"
+    mm_item 0 "↩" "Back" "" "$MM_BOX"
+    mm_prompt
+    read -r choice
     case "$choice" in
       1) setup_discord_bot ;;
       2) setup_lvib ;;
       3) bot_status ;;
-      4) echo "  Coming soon..."; sleep 1 ;;
+      4) echo "  ${YLW}🚧 Coming soon...${RST}"; sleep 1 ;;
       5) start_bot_menu ;;
       6) stop_bot ;;
       7) update_bot ;;
@@ -3155,7 +3413,7 @@ while true; do
   read -r choice
   case "$choice" in
     1) auto_backup_menu ;;
-    2) echo "  Coming soon..."; sleep 1 ;;
+    2) echo "  ${YLW}🚧 Coming soon...${RST}"; sleep 1 ;;
     3) show_version ;;
     0) clear; exit 0 ;;
     *) err "Invalid option"; sleep 1 ;;
