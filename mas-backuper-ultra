@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.2.0"
-MAS_UPDATED="2026-11-01 12:00 UTC"
+MAS_VERSION="6.4.0"
+MAS_UPDATED="2026-11-01 22:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
 
@@ -38,6 +38,45 @@ header() {
   echo
 }
 
+# ---- Main-menu look (boxed header + icon menu) ----------------------------------
+MM_BOX=$'\e[38;5;167m'      # red frame
+MM_TITLE=$'\e[38;5;79m'     # ◆ MAS GUI ◆
+MM_SUB=$'\e[38;5;73m'       # subtitle
+MM_NUM=$'\e[38;5;78m'       # option numbers
+MM_ORG=$'\e[1;38;5;215m'    # orange brand / highlight
+MM_SUBTITLE="Pterodactyl Panel Toolkit"   # <- change this text if you want another subtitle
+MM_W=44
+
+mm_row() {   # mm_row <plain text> <colour> [visible-length]  (centres, then colours)
+  local t="$1" c="$2" n="${3:-${#1}}" pad l r
+  pad=$(( MM_W - n )); l=$(( pad / 2 )); r=$(( pad - l ))
+  printf '%s┃%s%*s%s%s%s%*s%s┃%s\n' "$MM_BOX" "$RST" "$l" '' "$c" "$t" "$RST" "$r" '' "$MM_BOX" "$RST"
+}
+
+main_header() {
+  local line
+  line="$(printf '━%.0s' $(seq 1 $MM_W))"
+  command -v clear >/dev/null 2>&1 && clear || printf '\033c'
+  echo
+  echo " ${MM_BOX}┏${line}┓${RST}"
+  printf ' '; mm_row "" ""
+  printf ' '; mm_row "◆ MAS GUI ◆" "$BOLD$MM_TITLE" 11
+  printf ' '; mm_row "$MM_SUBTITLE" "$MM_SUB"
+  printf ' '; mm_row "ITZMAS GAMING" "$MM_ORG"
+  printf ' '; mm_row "v$MAS_VERSION" "$BOLD"
+  printf ' '; mm_row "" ""
+  echo " ${MM_BOX}┗${line}┛${RST}"
+  echo
+}
+
+mm_item() {   # mm_item <number> <icon> <label> [label-colour] [number-colour]
+  printf '  %s❯%s %s%-2s%s %s %s%s%s\n' "$MM_TITLE" "$RST" "${5:-$MM_NUM}" "$1" "$RST" "$2" "${4:-}" "$3" "$RST"
+}
+
+mm_prompt() {  # prints the prompt, caller does the read
+  printf '\n %sSelect an option:%s ' "$MM_TITLE" "$RST"
+}
+
 err()   { echo "  ${RED}✖ $*${RST}"; }
 ok()    { echo "  ${GRN}✔ $*${RST}"; }
 warn()  { echo "  ${YLW}⚠ $*${RST}"; }
@@ -60,7 +99,7 @@ CLI (used by the menu):
   check          exit 0 if the bot is in the configured server, 3 if not
   inspect        read-only: 0 = empty server, 4 = backup data found, 3 = bot not in server
   protect        make a server that has backups private without deleting anything
-  run            start the bot (/setup /vps add /vps list /nodes /info-vps /backup /importbackup /focusbackup)
+  run            start the bot (/setup /vps add /vps list /nodes /info-vps /sshx /access /backup /copybackup /importbackup /focusbackup)
 """
 from __future__ import annotations
 
@@ -76,6 +115,9 @@ import logging
 import os
 import posixpath
 import re
+import shlex
+import shutil
+import signal
 import stat
 import sys
 import tarfile
@@ -87,8 +129,8 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.2.0"
-UPDATED = "2026-11-01 12:00 UTC"
+VERSION = "6.4.0"
+UPDATED = "2026-11-01 22:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -468,9 +510,7 @@ async def ensure_marker(guild: discord.Guild):
     if ch:
         return ch, False
     cat = discord.utils.get(guild.categories, name=SYSTEM_CAT) or await guild.create_category(SYSTEM_CAT)
-    ch = await guild.create_text_channel(MARKER, category=cat, topic="Backup marker. DO NOT DELETE.")
-    for _ in range(10):
-        await ch.send(WARNING)
+    ch = await guild.create_text_channel(MARKER, category=cat, topic=f"Backup marker. DO NOT DELETE. {WARNING}")
     return ch, True
 
 
@@ -557,23 +597,57 @@ async def read_exact(f, n: int) -> bytes:
     return bytes(buf)
 
 
+# ------------------------------------------------------------------ GUI helpers (every message is an embed)
+FOOTER = "MAS GUI v6.4"
+_KIND = {"info": ("ℹ️", 0x00E5FF), "ok": ("✅", 0x2ECC71), "warn": ("⚠️", 0xF1C40F),
+         "error": ("❌", 0xE74C3C), "wait": ("⏳", 0x3498DB)}
+
+
+def ui(kind: str, title: str, desc: str | None = None, fields=None, footer: str | None = None) -> discord.Embed:
+    """One look for every message the bot sends. fields = [(name, value[, inline]), ...]"""
+    icon, color = _KIND[kind]
+    e = discord.Embed(title=f"{icon}  {title}"[:256], description=(desc or "")[:4000] or None,
+                      color=discord.Color(color), timestamp=discord.utils.utcnow())
+    for f in fields or []:
+        e.add_field(name=str(f[0])[:256], value=str(f[1])[:1024] or "\u200b", inline=(f[2] if len(f) > 2 else False))
+    e.set_footer(text=footer or FOOTER)
+    return e
+
+
+async def reply(inter: discord.Interaction, embed: discord.Embed, ephemeral: bool = False, view=None) -> None:
+    kw: dict = {"embed": embed, "ephemeral": ephemeral}
+    if view is not None:
+        kw["view"] = view
+    if inter.response.is_done():
+        await inter.followup.send(**kw)
+    else:
+        await inter.response.send_message(**kw)
+
+
 class Status:
+    """Live progress card: one embed that is edited while a backup/restore runs."""
+
     def __init__(self, channel, title: str):
         self.channel, self.title, self.msg, self.last = channel, title, None, 0.0
 
-    async def update(self, text: str, force: bool = False) -> None:
-        text = f"**{self.title}** - {text}"[:1900]
+    async def update(self, text: str, force: bool = False, pct: float | None = None, fields=None,
+                     state: str = "wait") -> None:
         now = time.monotonic()
+        if not (force or self.msg is None or now - self.last > 10):
+            return                                      # throttled: don't even build the embed
+        desc = str(text)[:1500]
+        if pct is not None:
+            desc += f"\n`{bar(pct, 20)}` **{pct:.0f}%**"
+        e = ui(state, self.title, desc, fields() if callable(fields) else fields,
+               footer=f"{FOOTER} • live progress")
         try:
             if self.msg is None:
-                self.msg = await self.channel.send(text, allowed_mentions=NO_MENTIONS)
-                self.last = now
-            elif force or now - self.last > 10:
-                await self.msg.edit(content=text)
-                self.last = now
+                self.msg = await self.channel.send(embed=e, allowed_mentions=NO_MENTIONS)
+            else:
+                await self.msg.edit(embed=e)
+            self.last = now
         except discord.HTTPException:
             pass
-
 
 # ------------------------------------------------------------------ fast backup engine
 class Bundle:
@@ -663,8 +737,7 @@ class Backup:
             for ln in lines + [None]:
                 if chunk and (ln is None or size + len(ln.encode()) + 1 > maxb):
                     name = f"paths{SEP}{int(time.time())}{SEP}{next(self.counter)}.jsonl"
-                    await send_file(self.rp, "\n".join(chunk).encode(), name,
-                                    content=f"📒 index: {len(chunk)} files")
+                    await send_file(self.rp, "\n".join(chunk).encode(), name)
                     chunk, size = [], 0
                 if ln is not None:
                     chunk.append(ln)
@@ -832,18 +905,30 @@ def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) ->
     e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
     e.add_field(name="📂 Channels used", value=f"{channels:,}", inline=True)
     e.add_field(name="🖥️ Source", value=where, inline=True)
-    e.set_footer(text="MAS GUI v6.0 • Auto Backup")
+    e.set_footer(text="MAS GUI v6.4 • Auto Backup")
     return e
 
 
-async def announce(guild: discord.Guild, channel, embed: discord.Embed) -> None:
-    """Post the embed in the channel and DM it to the server owner."""
-    try:
-        await channel.send(embed=embed)
-    except discord.HTTPException as e:
-        log.error("could not post the result message: %s", e)
+async def announce(guild: discord.Guild, channel, embed: discord.Embed, ping: bool = False) -> None:
+    """Post the embed in #talk-cmds-here (the only channel the bot talks in) and DM it to the owner.
+    ping=True also @mentions the owner in the channel."""
+    channel = discord.utils.get(guild.text_channels, name=TALK) or channel
+    owner = None
     try:
         owner = guild.get_member(guild.owner_id) or await guild.fetch_member(guild.owner_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not find the owner: %s", e)
+    try:
+        if ping and owner is not None:
+            await channel.send(content=owner.mention, embed=embed,
+                               allowed_mentions=discord.AllowedMentions(users=[owner]))
+        else:
+            await channel.send(embed=embed)
+    except discord.HTTPException as e:
+        log.error("could not post the result message: %s", e)
+    if owner is None:
+        return
+    try:
         dm = embed.copy()
         dm.add_field(name="🔗 Open", value=f"[Go to #{channel.name}]({channel.jump_url})", inline=False)
         await owner.send(embed=dm)
@@ -852,6 +937,34 @@ async def announce(guild: discord.Guild, channel, embed: discord.Embed) -> None:
         log.warning("Could not DM the owner (their DMs are closed for server members).")
     except Exception as e:  # noqa: BLE001
         log.warning("could not DM the owner: %s", e)
+
+
+def restore_embed(vps_n: int, v: dict, prog: dict, nbytes: int, elapsed: float, total: int,
+                  src: int | None = None, skipped: int = 0) -> discord.Embed:
+    """vps_n = the VPS that received the files. src = set when the files came from another VPS's backup."""
+    clean = prog["failed"] == 0
+    if src is not None:
+        name = f"VPS-{src} backup copied into VPS-{vps_n}" if clean else f"VPS-{src} → VPS-{vps_n} copy finished with errors"
+        desc = (f"Every file of the **vps-{src}** backup was pasted into **vps-{vps_n}**." if clean else
+                f"The **vps-{src}** backup was pasted into **vps-{vps_n}**, but some files failed. See the bot console/log.")
+    else:
+        name = f"VPS-{vps_n} fully imported" if clean else f"VPS-{vps_n} import finished with errors"
+        desc = (f"Every backed-up file of **vps-{vps_n}** was restored to its old path." if clean else
+                f"**vps-{vps_n}** was restored, but some files failed. Details are in the bot console/log.")
+    e = discord.Embed(title=f"{'✅' if clean else '⚠️'}  {name}", description=desc,
+                      color=discord.Color(0x2ECC71 if clean else 0xF1C40F), timestamp=discord.utils.utcnow())
+    where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+    speed = nbytes / elapsed if elapsed > 0 else 0
+    e.add_field(name="📁 Restored", value=f"{prog['ok']:,} / {total:,}", inline=True)
+    e.add_field(name="❌ Failed", value=f"{prog['failed']:,}", inline=True)
+    e.add_field(name="💾 Data", value=fmt_bytes(nbytes), inline=True)
+    e.add_field(name="⏱️ Time", value=fmt_time(elapsed), inline=True)
+    e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
+    e.add_field(name="🖥️ Target", value=where, inline=True)
+    if skipped:
+        e.add_field(name="🛡️ Skipped (protected)", value=f"{skipped:,} system files were left untouched", inline=False)
+    e.set_footer(text=f"{FOOTER} • {'Copy' if src is not None else 'Import'}")
+    return e
 
 
 async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
@@ -863,7 +976,7 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     bk = Backup(guild, v, cfg, rp, state)
     t0 = time.monotonic()
     log.info("backup of vps%d started", vps_n)
-    await status.update(f"vps-{vps_n}: starting...", force=True)
+    await status.update(f"Starting backup of **vps-{vps_n}**…", force=True)
     try:
         async with open_fs(v) as sftp:
             bk.sftp = sftp
@@ -873,9 +986,10 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
                 except Exception as e:  # noqa: BLE001
                     bk.fail(path, e)
                 s = bk.stats
-                await status.update(
-                    f"vps-{vps_n}: {s['ok']} saved, {s['skipped']} unchanged, {s['failed']} failed, "
-                    f"{s['bytes'] / 1048576:.1f} MB (now: `{path[-70:]}`)")
+                await status.update(f"Reading and uploading files from **vps-{vps_n}**…", fields=lambda: [
+                    ("📁 Saved", f"{s['ok']:,}", True), ("⏭️ Unchanged", f"{s['skipped']:,}", True),
+                    ("❌ Failed", f"{s['failed']:,}", True), ("💾 Data", fmt_bytes(s["bytes"]), True),
+                    ("📄 Now", f"`{path[-70:]}`", False)])
             await bk.finish()
     finally:
         save_state(vps_n, state)
@@ -884,9 +998,8 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     save_vps(vps_n, v)
     s = bk.stats
     log.info("backup of vps%d finished: %s", vps_n, s)
-    await status.update(
-        f"vps-{vps_n} DONE in {time.monotonic() - t0:.0f}s - {s['ok']} saved, {s['skipped']} unchanged, "
-        f"{s['failed']} failed, {s['bytes'] / 1048576:.1f} MB", force=True)
+    await status.update(f"Backup of **vps-{vps_n}** finished in {fmt_time(time.monotonic() - t0)}", force=True,
+                        pct=100, state="ok" if s["failed"] == 0 else "warn")
     await announce(guild, status.channel,
                    backup_embed(vps_n, v, s, time.monotonic() - t0, len(bk.cache)))
 
@@ -971,19 +1084,26 @@ async def restore_bundle(guild, sftp, ch_id: int, msg_id: int, recs: list[dict])
     return done, failed
 
 
-async def run_import(guild: discord.Guild, vps_n: int, status: Status) -> None:
-    v = load_vps(vps_n)
+async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n: int | None = None) -> None:
+    """Restore the backup of vps_n. With target_n set, paste that backup into ANOTHER vps (/copybackup)."""
+    tn = target_n or vps_n
+    v = load_vps(tn)
     cats = vps_categories(guild, vps_n)
     rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
     if rp is None:
         raise ValueError(f"no `{RECORDS}` channel found for vps-{vps_n}")
-    await status.update("reading the path index...", force=True)
+    await status.update(f"Reading the path index of **vps-{vps_n}**…", force=True)
     records: dict[str, dict] = {}
     async for msg in rp.history(limit=None, oldest_first=True):
         for rec in await parse_records(msg):
             if int(rec.get("vps", vps_n)) == vps_n:
                 records[rec["path"]] = rec            # newest record for a path wins
-    log.info("import vps%d: %d files in index", vps_n, len(records))
+    skipped = 0
+    if target_n is not None:                         # copy to another VPS: keep that VPS reachable and itself
+        skip = load_cfg().get("copy_skip", COPY_SKIP)
+        keep = {p: r for p, r in records.items() if not excluded(p, skip)}
+        skipped, records = len(records) - len(keep), keep
+    log.info("import vps%d -> vps%d: %d files in index (%d skipped)", vps_n, tn, len(records), skipped)
     singles = [r for r in records.values() if not r.get("member")]
     bundles: dict[tuple, list] = defaultdict(list)
     for r in records.values():
@@ -1003,7 +1123,9 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status) -> None:
             except Exception as e:  # noqa: BLE001
                 prog["failed"] += 1
                 log.error("restore failed for %s: %s", rec.get("path"), e)
-            await status.update(f"restore: {prog['ok']}/{total} done, {prog['failed']} failed")
+            await status.update(f"Restoring files to **vps-{tn}**…", pct=(prog["ok"] + prog["failed"]) * 100 / max(1, total),
+                                fields=lambda: [("📁 Restored", f"{prog['ok']:,} / {total:,}", True),
+                                                ("❌ Failed", f"{prog['failed']:,}", True)])
 
     async def do_bundle(key, recs):
         async with sem:
@@ -1015,45 +1137,53 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status) -> None:
             except Exception as e:  # noqa: BLE001
                 prog["failed"] += len(recs)
                 log.error("bundle %s restore failed: %s", key, e)
-            await status.update(f"restore: {prog['ok']}/{total} done, {prog['failed']} failed")
+            await status.update(f"Restoring files to **vps-{tn}**…", pct=(prog["ok"] + prog["failed"]) * 100 / max(1, total),
+                                fields=lambda: [("📁 Restored", f"{prog['ok']:,} / {total:,}", True),
+                                                ("❌ Failed", f"{prog['failed']:,}", True)])
 
     t0 = time.monotonic()
     async with open_fs(v) as sftp:
         await asyncio.gather(*[do_single(r) for r in singles],
                              *[do_bundle(k, rs) for k, rs in bundles.items()])
-    st = load_state(vps_n)                              # so the next /backup doesn't re-upload everything
-    for r in restored:
-        st[r["path"]] = f"{r['size']}|{r.get('mtime', 0)}"
-    save_state(vps_n, st)
-    v["synced"] = True
-    save_vps(vps_n, v)
-    await status.update(
-        f"vps-{vps_n} restore DONE in {time.monotonic() - t0:.0f}s - {prog['ok']} restored, "
-        f"{prog['failed']} failed", force=True)
+    if target_n is None:        # plain restore: the next /backup must not re-upload everything
+        st = load_state(vps_n)
+        for r in restored:
+            st[r["path"]] = f"{r['size']}|{r.get('mtime', 0)}"
+        save_state(vps_n, st)
+        v["synced"] = True
+        save_vps(vps_n, v)
+    elapsed = time.monotonic() - t0
+    nbytes = sum(int(r.get("size", 0)) for r in restored)
+    await status.update(f"{'Copy into' if target_n else 'Restore of'} **vps-{tn}** finished in {fmt_time(elapsed)}", force=True, pct=100,
+                        state="ok" if prog["failed"] == 0 else "warn")
+    # DM + @ping the owner (the bot only ever speaks in #talk-cmds-here)
+    await announce(guild, status.channel, restore_embed(tn, v, prog, nbytes, elapsed, total, src=vps_n if target_n else None, skipped=skipped), ping=True)
 
 
 async def backup_job(bot, channel, guild, nums: list[int]) -> None:
+    channel = await ensure_talk(guild)              # the bot only ever writes in #talk-cmds-here
     if bot.lock.locked():
-        await channel.send("Another backup/restore is already running.")
+        await channel.send(embed=ui("warn", "Already busy", "Another backup/restore is running. Wait until it finishes."))
         return
     async with bot.lock:
         for n in nums:
             try:
                 v = load_vps(n)
                 if not v.get("synced") and vps_has_data(guild, n):
-                    await channel.send(
-                        f"⏳ **vps-{n}** already has backup data in this server. Choose first: "
-                        f"`/importbackup vps:{n}` (restore it onto this VPS) or "
-                        f"`/focusbackup vps:{n}` (delete it and start fresh).")
+                    await channel.send(embed=ui(
+                        "warn", f"VPS-{n} already has backup data",
+                        "This server already holds a backup of this VPS. Choose first:",
+                        [("🛟 Restore it onto this VPS", f"`/importbackup vps:{n}`", True),
+                         ("🗑️ Delete it and start fresh", f"`/focusbackup vps:{n}`", True)]))
                     continue
-                await run_backup(guild, n, Status(channel, f"vps-{n}"))
+                await run_backup(guild, n, Status(channel, f"VPS-{n} backup"))
             except Exception as e:  # noqa: BLE001
                 log.exception("backup of vps%d crashed: %s", n, e)
                 err = discord.Embed(
                     title=f"❌  VPS-{n} backup failed",
                     description=f"```{str(e)[:500]}```\nSee the bot console/log for details.",
                     color=discord.Color(0xE74C3C), timestamp=discord.utils.utcnow())
-                err.set_footer(text="MAS GUI v6.0 • Auto Backup")
+                err.set_footer(text="MAS GUI v6.4 • Auto Backup")
                 await announce(guild, channel, err)
 
 
@@ -1067,17 +1197,23 @@ class Confirm(discord.ui.View):
     async def interaction_check(self, i: discord.Interaction) -> bool:
         return i.user.id == self.owner_id
 
+    async def _done(self, i: discord.Interaction, ok: bool, note: str) -> None:
+        self.ok = ok
+        if i.message is not None and i.message.embeds:
+            emb = i.message.embeds[0].copy()
+            emb.set_footer(text=note)
+            await i.response.edit_message(embed=emb, view=None)
+        else:
+            await i.response.edit_message(view=None)
+        self.stop()
+
     @discord.ui.button(style=discord.ButtonStyle.danger)
     async def yes_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        self.ok = True
-        await i.response.edit_message(view=None)
-        self.stop()
+        await self._done(i, True, "✅ Confirmed")
 
     @discord.ui.button(style=discord.ButtonStyle.secondary)
     async def no_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        self.ok = False
-        await i.response.edit_message(view=None)
-        self.stop()
+        await self._done(i, False, "✖ Cancelled")
 
 
 class VpsAddModal(discord.ui.Modal, title="Add VPS"):
@@ -1102,21 +1238,25 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
             guild = interaction.guild
             log.info("VPS %d added via /vps add", n)
             if vps_has_data(guild, n):
-                msg = (f"⏳ **vps-{n}** was added, but a `vps-{n}` category with old backup data already "
-                       f"exists. Waiting for you: `/importbackup vps:{n}` (restore it onto this VPS) or "
-                       f"`/focusbackup vps:{n}` (delete it and start fresh).")
-                await (await ensure_talk(guild)).send(msg)
-                await interaction.followup.send(msg, ephemeral=True)
+                await (await ensure_talk(guild)).send(embed=ui(
+                    "warn", f"VPS-{n} added - waiting for your choice",
+                    f"A `vps-{n}` category with old backup data already exists.",
+                    [("🛟 Restore it onto this VPS", f"`/importbackup vps:{n}`", True),
+                     ("🗑️ Delete it and start fresh", f"`/focusbackup vps:{n}`", True)]))
+                await interaction.followup.send(embed=ui("ok", f"VPS-{n} added", "SSH login works. See the message above."),
+                                                ephemeral=True)
             else:
                 await ensure_category(guild, n)
                 await records_channel(guild, n)
                 v["synced"] = True            # nothing old to decide about: first backup can start
                 save_vps(n, v)
-                await interaction.followup.send(
-                    f"✅ vps-{n} added. Run `/backup vps:{n}` to start backing it up.", ephemeral=True)
+                await interaction.followup.send(embed=ui(
+                    "ok", f"VPS-{n} added", "SSH login works. The VPS is ready for its first backup.",
+                    [("▶️ Start the backup", f"`/backup vps:{n}`", True),
+                     ("📊 See its details", f"`/info-vps number:{n}`", True)]), ephemeral=True)
         except Exception as e:  # noqa: BLE001
             log.exception("/vps add failed: %s", e)
-            await interaction.followup.send(f"❌ Could not add VPS: `{e}`", ephemeral=True)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", f"```{str(e)[:500]}```"), ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         log.exception("modal error: %s", error)
@@ -1125,10 +1265,15 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
 async def guard(interaction: discord.Interaction) -> bool:
     cfg = load_cfg()
     if interaction.guild is None or interaction.guild_id != int(cfg.get("guild_id", 0)):
-        await interaction.response.send_message("Wrong server.", ephemeral=True)
+        await reply(interaction, ui("error", "Wrong server", "This bot only works in its own backup server."), ephemeral=True)
         return False
     if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("Only the server owner can use this.", ephemeral=True)
+        await reply(interaction, ui("error", "Owner only", "Only the server owner can use this bot."), ephemeral=True)
+        return False
+    talk = await ensure_talk(interaction.guild)
+    if interaction.channel_id != talk.id:
+        await reply(interaction, ui("warn", "Wrong channel", f"I only talk in {talk.mention}. Run the command there."),
+                    ephemeral=True)
         return False
     return True
 
@@ -1138,10 +1283,10 @@ async def send_nodes(interaction: discord.Interaction) -> None:
         return
     nums = vps_numbers()
     if not nums:
-        await interaction.response.send_message("No VPS added yet. Use `/vps add`.", ephemeral=True)
+        await reply(interaction, ui("info", "No VPS yet", "Add your first one with `/vps add`."), ephemeral=True)
         return
-    lines = []
-    for n in nums:
+    fields = []
+    for n in nums[:25]:
         try:
             v = load_vps(n)
         except Exception:  # noqa: BLE001
@@ -1153,9 +1298,10 @@ async def send_nodes(interaction: discord.Interaction) -> None:
         elif v.get("last_backup"):
             st = f"✅ last backup <t:{int(v['last_backup'])}:R>"
         else:
-            st = "no backup yet"
-        lines.append(f"**vps-{n}** - {where} - {st}")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            st = "⚪ no backup yet"
+        fields.append((f"🖥️ vps-{n}", f"📡 `{where}`\n{st}", len(nums) > 1))
+    await reply(interaction, ui("info", "VPS nodes", f"**{len(fields)}** VPS added • `/info-vps number:<n>` for full details",
+                                fields), ephemeral=True)
 
 
 # ------------------------------------------------------------------ commands
@@ -1165,34 +1311,45 @@ async def cmd_setup(interaction: discord.Interaction):
         return
     guild, chan = interaction.guild, interaction.channel
     if backups_exist(guild):
-        await interaction.response.send_message("Existing backup data found (`mas-backups`). Nothing was deleted.")
-        for _ in range(10):
-            await chan.send(WARNING)
-        await chan.send("Use `/importbackup vps:<n>` to restore a VPS's data, or `/focusbackup vps:<n>` "
-                        "to delete that VPS's old backup and start from scratch.")
+        await reply(interaction, ui(
+            "warn", "Backup data already exists",
+            "Found existing backup data (`mas-backups`). **Nothing was deleted.**",
+            [("🛟 Restore a VPS", "`/importbackup vps:<n>`", True),
+             ("🗑️ Start a VPS fresh", "`/focusbackup vps:<n>`", True)]))
+        await chan.send(embed=ui("warn", "Do not delete the backup channels",
+                                 "If you delete them, **the backed-up data is lost for good.**"))
         return
     view = Confirm(interaction.user.id, "Yes, wipe everything", "Cancel")
-    await interaction.response.send_message(
-        "⚠ This deletes **every channel** and kicks **every member** except the owner and this bot. Continue?",
+    await reply(interaction, ui(
+        "warn", "Wipe this server?",
+        "This deletes **every channel** and kicks **every member** except the owner and this bot.\n"
+        "Backups are only created after this step.", [("⚠️ This cannot be undone", "Continue only if this server is empty of backups.")]),
         view=view)
     await view.wait()
     if not view.ok:
         return
     talk = await ensure_talk(guild)
-    await wipe_guild(guild, keep=talk)
-    await talk.send(f"{interaction.user.mention} server cleaned - continue here.",
+    try:
+        await wipe_guild(guild, keep=talk)
+    except Exception as e:  # noqa: BLE001
+        log.exception("setup wipe failed: %s", e)
+        await talk.send(embed=ui("error", "Setup stopped", f"```{str(e)[:500]}```\nNothing else was changed."))
+        return
+    await talk.send(content=interaction.user.mention,
+                    embed=ui("ok", "Server cleaned", "The server is now private. Continue here in this channel."),
                     allowed_mentions=discord.AllowedMentions(users=True))
     nums = vps_numbers()
     if not nums:
-        await talk.send("No VPS added yet - use `/vps add`.")
+        await talk.send(embed=ui("info", "No VPS added yet", "Use `/vps add` to add your first VPS."))
         return
     ask = Confirm(interaction.user.id, "Yes, backup whole VPS now", "Later")
-    await talk.send(f"Backup the whole VPS now? (vps {', '.join(map(str, nums))})", view=ask)
+    await talk.send(embed=ui("wait", "Back up now?", f"Back up the whole VPS now?",
+                             [("🖥️ VPS", ", ".join(f"vps-{n}" for n in nums))]), view=ask)
     await ask.wait()
     if ask.ok:
         await backup_job(interaction.client, talk, guild, nums)
     else:
-        await talk.send("Okay - run `/backup` whenever you're ready.")
+        await talk.send(embed=ui("info", "No problem", "Run `/backup` whenever you're ready."))
 
 
 vps_group = app_commands.Group(name="vps", description="Manage VPS backups")
@@ -1220,9 +1377,10 @@ async def cmd_backup(interaction: discord.Interaction, vps: int = 0):
         return
     nums = vps_numbers() if vps == 0 else [vps]
     if not nums or any(not vps_file(n).exists() for n in nums):
-        await interaction.response.send_message("No such VPS. Use `/vps add` first.", ephemeral=True)
+        await reply(interaction, ui("error", "No such VPS", "Add it first with `/vps add`, or check `/nodes`."), ephemeral=True)
         return
-    await interaction.response.send_message(f"Starting backup of vps {', '.join(map(str, nums))}...")
+    await reply(interaction, ui("wait", "Backup started", "Progress appears below while it runs.",
+                                [("🖥️ VPS", ", ".join(f"vps-{n}" for n in nums))]))
     await backup_job(interaction.client, interaction.channel, interaction.guild, nums)
 
 
@@ -1231,28 +1389,29 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
     if not await guard(interaction):
         return
     if not vps_file(vps).exists():
-        await interaction.response.send_message(f"vps-{vps} isn't added. Use `/vps add` first.", ephemeral=True)
+        await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/vps add` first."), ephemeral=True)
         return
     if not vps_categories(interaction.guild, vps):
-        await interaction.response.send_message(f"No backup data for vps-{vps} in this server.", ephemeral=True)
+        await reply(interaction, ui("error", "No backup data", f"There is no backup of vps-{vps} in this server."), ephemeral=True)
         return
     view = Confirm(interaction.user.id, "Restore (overwrites files)", "Cancel")
-    await interaction.response.send_message(
-        f"⚠ This reads `{RECORDS}` and **overwrites** matching files on vps-{vps} with the backed-up "
-        f"versions, at their old paths. Continue?", view=view)
+    await reply(interaction, ui(
+        "warn", f"Restore vps-{vps}?",
+        f"This reads `{RECORDS}` and **overwrites** matching files on vps-{vps} with the backed-up versions, "
+        f"at their old paths.", [("🔔 When it's done", "I will ping you here and DM you.")]), view=view)
     await view.wait()
     if not view.ok:
         return
     bot, chan = interaction.client, interaction.channel
     if bot.lock.locked():
-        await chan.send("Another backup/restore is already running.")
+        await chan.send(embed=ui("warn", "Already busy", "Another backup/restore is running. Wait until it finishes."))
         return
     async with bot.lock:
         try:
-            await run_import(interaction.guild, vps, Status(chan, f"vps-{vps}"))
+            await run_import(interaction.guild, vps, Status(chan, f"VPS-{vps} restore"))
         except Exception as e:  # noqa: BLE001
             log.exception("import failed: %s", e)
-            await chan.send(f"❌ Import failed: `{e}` (see console)")
+            await chan.send(embed=ui("error", f"Import of vps-{vps} failed", f"```{str(e)[:500]}```\nSee the bot console/log."))
 
 
 @app_commands.command(name="focusbackup", description="Delete a VPS's old backup data and start it fresh (0 = every VPS)")
@@ -1260,13 +1419,15 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
     if not await guard(interaction):
         return
     if vps and not vps_file(vps).exists():
-        await interaction.response.send_message(f"vps-{vps} isn't added. Use `/vps add` first.", ephemeral=True)
+        await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/vps add` first."), ephemeral=True)
         return
     what = f"all backup data of **vps-{vps}**" if vps else "**all backup data of every VPS**"
     view = Confirm(interaction.user.id, "Delete old backup + start fresh", "Cancel")
-    await interaction.response.send_message(
-        f"⚠ This **permanently deletes {what}** (every channel in the category first, then the category) "
-        f"and creates it again from scratch. Continue?", view=view)
+    await reply(interaction, ui(
+        "warn", "Delete backup and start fresh?",
+        f"This **permanently deletes {what}** (every channel in the category first, then the category) "
+        f"and creates it again from scratch.", [("⚠️ This cannot be undone", "The old backup will be gone for good.")]),
+        view=view)
     await view.wait()
     if not view.ok:
         return
@@ -1290,9 +1451,8 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
         await ensure_category(guild, n)
         await records_channel(guild, n)
     await ensure_talk(guild)
-    await chan.send("Old backup data deleted and fresh categories created. Starting backup...")
+    await chan.send(embed=ui("ok", "Old backup deleted", "Fresh categories were created. Starting the backup now…"))
     await backup_job(interaction.client, chan, guild, nums)
-
 
 # ------------------------------------------------------------------ /info-vps
 # One small POSIX shell script is run on the VPS (over SSH, or locally for the bot's own machine).
@@ -1712,7 +1872,7 @@ def build_info_embed(n: int, v: dict, live: dict, info: dict | None, bk: dict, s
         e.add_field(name="🛡️ Backup coverage",
                     value="Can't compare files while the VPS is not connected. The numbers above come from the last backup.",
                     inline=False)
-    e.set_footer(text="MAS GUI v6.2 • /info-vps")
+    e.set_footer(text="MAS GUI v6.4 • /info-vps")
     return e
 
 
@@ -1743,7 +1903,7 @@ async def run_info(inter: discord.Interaction, n: int) -> None:
     try:
         v = load_vps(n)
     except Exception as e:  # noqa: BLE001
-        await _safe_edit(inter, content=f"Could not read vps-{n}: `{e}`", embed=None, view=None)
+        await _safe_edit(inter, content=None, embed=ui("error", f"Could not read vps-{n}", f"```{str(e)[:300]}```"), view=None)
         return
     running = inter.client.lock.locked()
     await _safe_edit(inter, content=None, embed=discord.Embed(
@@ -1776,7 +1936,7 @@ async def cmd_info(interaction: discord.Interaction, number: int):
     if not await guard(interaction):
         return
     if not vps_file(number).exists():
-        await interaction.response.send_message(f"vps-{number} isn't added. Use `/nodes` to see your VPS list.", ephemeral=True)
+        await reply(interaction, ui("error", f"vps-{number} isn't added", "Use `/nodes` to see your VPS list."), ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     await run_info(interaction, number)
@@ -1799,6 +1959,449 @@ async def cmd_info_autocomplete(interaction: discord.Interaction, current: str):
     return out[:25]
 
 
+# ------------------------------------------------------------------ shared helpers for /sshx and /access
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+
+
+def conn_error(e: Exception) -> str:
+    if isinstance(e, asyncssh.PermissionDenied):
+        return "The VPS answered but refused the login (did the user/password change?)."
+    if isinstance(e, asyncio.TimeoutError):
+        return "The VPS did not answer in time (it may be offline)."
+    return (str(e) or type(e).__name__)[:300]
+
+
+async def run_script(v: dict, script: str, timeout: float = 60) -> str:
+    """Run a small shell script on the VPS (or on this machine for a local VPS) and return its output."""
+    if v.get("local"):
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-s", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        data, _ = await asyncio.wait_for(proc.communicate(script.encode()), timeout)
+        return data.decode(errors="replace")
+    conn = await asyncio.wait_for(ssh_connect(v), 15)
+    try:
+        res = await asyncio.wait_for(conn.run("sh -s", input=script, check=False), timeout)
+        out = res.stdout
+        return out if isinstance(out, str) else (out or b"").decode(errors="replace")
+    finally:
+        conn.close()
+        await conn.wait_closed()
+
+
+def where_of(v: dict) -> str:
+    return "this machine (local)" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
+
+
+# ------------------------------------------------------------------ /sshx
+SSHX_SCRIPT = r'''
+export PATH="$PATH:/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/.sshx/bin:$HOME/bin:/root/.local/bin"
+if ! command -v sshx >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1; then
+    curl -sSf https://sshx.io/get | sh >/tmp/mas-sshx-install.log 2>&1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://sshx.io/get | sh >/tmp/mas-sshx-install.log 2>&1
+  else
+    echo "NO_FETCH=1"; exit 0
+  fi
+fi
+BIN=$(command -v sshx 2>/dev/null)
+if [ -z "$BIN" ]; then
+  echo "NO_SSHX=1"
+  echo "LOG=$(tail -c 300 /tmp/mas-sshx-install.log 2>/dev/null | tr '\n' ' ')"
+  exit 0
+fi
+LOG=$(mktemp /tmp/mas-sshx.XXXXXX 2>/dev/null || echo /tmp/mas-sshx.$$)
+if command -v setsid >/dev/null 2>&1; then
+  setsid nohup "$BIN" >"$LOG" 2>&1 </dev/null &
+else
+  nohup "$BIN" >"$LOG" 2>&1 </dev/null &
+fi
+PID=$!
+ESC=$(printf '\033')
+i=0; URL=""
+while [ $i -lt 40 ]; do
+  URL=$(sed "s/${ESC}\[[0-9;?]*[A-Za-z]//g" "$LOG" 2>/dev/null | grep -o 'https://sshx\.io/[^[:space:]]*' | head -n1)
+  [ -n "$URL" ] && break
+  i=$((i+1)); sleep 1
+done
+echo "PID=$PID"
+echo "URL=$URL"
+[ -z "$URL" ] && echo "LOG=$(sed "s/${ESC}\[[0-9;?]*[A-Za-z]//g" "$LOG" 2>/dev/null | tail -c 400 | tr '\n' ' ')"
+'''
+_SSHX_URL = re.compile(r"https://sshx\.io/[^\s\"'<>]+")
+
+
+class SshxView(discord.ui.View):
+    """Private message: a link button (the link is never printed as text) + a stop button."""
+
+    def __init__(self, owner_id: int, n: int, v: dict, pid: str, url: str):
+        super().__init__(timeout=3600)
+        self.owner_id, self.n, self.v, self.pid = owner_id, n, v, pid
+        self.clear_items()
+        self.add_item(discord.ui.Button(label="Open sshx terminal", emoji="🔗", style=discord.ButtonStyle.link, url=url))
+        self.add_item(self.stop_btn)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Stop session", emoji="🛑", style=discord.ButtonStyle.danger)
+    async def stop_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=ui("wait", f"Stopping sshx on vps-{self.n}…"), view=None)
+        try:
+            if self.pid.isdigit():
+                await run_script(self.v, f"kill {self.pid} 2>/dev/null; sleep 1; kill -9 {self.pid} 2>/dev/null; echo done", 30)
+            await i.edit_original_response(embed=ui("ok", "sshx session stopped",
+                                                    f"The link for **vps-{self.n}** no longer works."))
+        except Exception as e:  # noqa: BLE001
+            await i.edit_original_response(embed=ui("error", "Could not stop the session", conn_error(e)))
+        self.stop()
+
+
+@app_commands.command(name="sshx", description="Create a private sshx web-terminal link for a VPS (only you see it)")
+@app_commands.describe(vps="VPS number (see /nodes)")
+async def cmd_sshx(interaction: discord.Interaction, vps: int):
+    if not await guard(interaction):
+        return
+    if not vps_file(vps).exists():
+        await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/nodes` to see your VPS list."), ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    v = load_vps(vps)
+    await interaction.edit_original_response(embed=ui(
+        "wait", f"Creating an sshx session on vps-{vps}…",
+        "🔌 Connecting\n⬇️ Installing sshx (only the first time)\n🚀 Starting the session\n🔗 Getting your private link\n\n"
+        "This can take up to a minute.", footer=f"{FOOTER} • sshx"))
+    try:
+        out = _ANSI_RE.sub("", await run_script(v, SSHX_SCRIPT, 100))
+    except Exception as e:  # noqa: BLE001
+        log.warning("sshx on vps%d failed: %s", vps, e)
+        await interaction.edit_original_response(embed=ui("error", f"Could not reach vps-{vps}", conn_error(e)))
+        return
+    kv = {}
+    for ln in out.splitlines():
+        if "=" in ln:
+            k, val = ln.split("=", 1)
+            kv.setdefault(k.strip(), val.strip())
+    m = _SSHX_URL.search(kv.get("URL", "")) or _SSHX_URL.search(out)
+    if not m:
+        if kv.get("NO_FETCH"):
+            why = "The VPS has neither `curl` nor `wget`, so sshx can't be installed."
+        elif kv.get("NO_SSHX"):
+            why = "sshx could not be installed.\n```" + (kv.get("LOG", "")[:400] or "no log") + "```"
+        else:
+            why = "sshx started but did not print a link.\n```" + (kv.get("LOG", "")[:400] or "no output") + "```"
+        await interaction.edit_original_response(embed=ui("error", f"sshx failed on vps-{vps}", why))
+        return
+    url, pid = m.group(0), kv.get("PID", "")
+    await interaction.edit_original_response(
+        embed=ui("ok", f"sshx ready • vps-{vps}", "Your private terminal link is ready. Press the button to open it.",
+                 [("🖥️ VPS", f"`{where_of(v)}`", True),
+                  ("🔒 Private", "Only you can see this message.", True),
+                  ("⚠️ Keep it secret", "Anyone with the link controls this VPS. Don't share it."),
+                  ("🛑 Stop", "The session keeps running on the VPS until you press **Stop session**.")],
+                 footer=f"{FOOTER} • sshx"),
+        view=SshxView(interaction.user.id, vps, v, pid, url))
+
+
+# ------------------------------------------------------------------ /access  (a private terminal inside Discord)
+TERMS: dict = {}
+QUICK = {
+    "overview": ("📊", "System overview", "uname -a; uptime; free -h; df -h /"),
+    "files": ("📁", "List files", "ls -la"),
+    "procs": ("🔥", "Top processes", "ps aux --sort=-%cpu | head -15"),
+    "net": ("🌐", "Network", "ip -brief addr 2>/dev/null || ip addr"),
+    "docker": ("🐳", "Docker containers", "docker ps -a 2>&1 | head -30"),
+    "logs": ("📜", "Recent system log", "journalctl -n 25 --no-pager 2>/dev/null || tail -n 25 /var/log/syslog"),
+}
+
+
+class TermSession:
+    """One private shell for a VPS. Each command runs in the remembered folder (cd works); the output is
+    captured with a time and size limit. Not interactive: use `top -bn1`, not `top`."""
+
+    def __init__(self, v: dict, n: int):
+        self.v, self.n, self.conn = v, n, None
+        self.cwd, self.home, self.ident = "~", "", ""
+        self.lines: list[str] = []
+        self.last_rc = None
+        self.lock = asyncio.Lock()
+        self.started = time.time()
+        self.alive = True
+
+    async def _ensure_conn(self) -> None:
+        if self.v.get("local"):
+            return
+        if self.conn is None or self.conn.is_closed():
+            self.conn = await asyncio.wait_for(ssh_connect(self.v), 15)
+
+    def _script(self, cmd: str) -> str:
+        return (f"cd {shlex.quote(self.cwd)} 2>/dev/null || cd \"$HOME\" 2>/dev/null\n"
+                f"{cmd}\n"
+                "__mas_rc=$?\n"
+                "printf '\\n__MAS_RC__%s\\n__MAS_PWD__%s\\n__MAS_ID__%s@%s\\n__MAS_HOME__%s\\n' "
+                "\"$__mas_rc\" \"$(pwd)\" \"$(id -un 2>/dev/null)\" \"$(hostname 2>/dev/null)\" \"$HOME\"\n")
+
+    async def open(self) -> None:
+        await self._ensure_conn()
+        await self.run("true", record=False)          # learns the home folder + user@host
+        self.last_rc = None
+
+    async def run(self, cmd: str, timeout: float = 60, limit: int = 60000, record: bool = True) -> None:
+        await self._ensure_conn()
+        script = self._script(cmd)
+        out = bytearray()
+        flags = {"timeout": False, "cut": False}
+
+        async def pump(stream) -> None:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    return
+                out.extend(chunk)
+                if len(out) > limit:
+                    flags["cut"] = True
+                    return
+
+        if self.v.get("local"):
+            sh = shutil.which("bash") or "sh"
+            proc = await asyncio.create_subprocess_exec(
+                sh, "-c", script, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            try:
+                await asyncio.wait_for(pump(proc.stdout), timeout)
+            except asyncio.TimeoutError:
+                flags["timeout"] = True
+            if proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            inner = (f"if command -v bash >/dev/null 2>&1; then exec bash -c {shlex.quote(script)}; "
+                     f"else exec sh -c {shlex.quote(script)}; fi")
+            proc = await self.conn.create_process(f"sh -c {shlex.quote(inner)}", request_pty="force",
+                                                  term_type="dumb", encoding=None, stdin=asyncssh.DEVNULL)
+            try:
+                await asyncio.wait_for(pump(proc.stdout), timeout)
+            except asyncio.TimeoutError:
+                flags["timeout"] = True
+            finally:
+                proc.close()                              # pty: closing the channel hangs up the command
+        text = _ANSI_RE.sub("", bytes(out).decode(errors="replace")).replace("\r\n", "\n").replace("\r", "\n")
+        cut = text.find("\n__MAS_RC__")
+        shown = text[:cut] if cut != -1 else text
+        for key, attr in (("RC", None), ("PWD", "cwd"), ("ID", "ident"), ("HOME", "home")):
+            m = re.search(rf"__MAS_{key}__(.*)", text)
+            if m:
+                val = m.group(1).strip()
+                if key == "RC":
+                    self.last_rc = int(val) if val.isdigit() else None
+                elif val:
+                    setattr(self, attr, val)
+        if not record:
+            return
+        first = cmd.strip().splitlines()[0] if cmd.strip() else ""
+        if len(cmd.strip().splitlines()) > 1:
+            first += " …"
+        self.lines.append(f"{self.prompt()} {first}")
+        for ln in shown.rstrip("\n").split("\n"):
+            if ln != "" or shown.strip():
+                self.lines.append(ln[:200] + ("…" if len(ln) > 200 else ""))
+        if flags["timeout"]:
+            self.lines.append(f"⏱ stopped after {int(timeout)}s")
+        if flags["cut"]:
+            self.lines.append("✂ output cut (too long)")
+
+    def short_cwd(self) -> str:
+        if self.home and self.cwd.startswith(self.home):
+            return "~" + self.cwd[len(self.home):]
+        return self.cwd
+
+    def prompt(self) -> str:
+        return f"{self.ident or f'vps-{self.n}'}:{self.short_cwd()}$"
+
+    def screen(self) -> str:
+        text = "\n".join(self.lines).replace("```", "'''")
+        if len(text) > 3300:
+            text = text[-3300:]
+            text = "… (older output scrolled away)\n" + text[text.find("\n") + 1:]
+        return text or "# connected - press ⌨️ Run command or pick a quick command"
+
+    def embed(self, busy: str | None = None) -> discord.Embed:
+        e = discord.Embed(title=f"💻  Terminal • vps-{self.n}", description=f"```bash\n{self.screen()}\n```",
+                          color=discord.Color(0x00E5FF if self.alive else 0x95A5A6), timestamp=discord.utils.utcnow())
+        status = "🔴 closed" if not self.alive else (f"⏳ running `{busy.strip().splitlines()[0][:40]}`" if busy else "🟢 connected")
+        rc = "—" if self.last_rc is None else (f"✅ {self.last_rc}" if self.last_rc == 0 else f"❌ {self.last_rc}")
+        e.add_field(name="📡 Status", value=status, inline=True)
+        e.add_field(name="📂 Folder", value=f"`{self.short_cwd()}`", inline=True)
+        e.add_field(name="↩️ Last exit", value=rc, inline=True)
+        e.set_footer(text=f"{FOOTER} • Terminal • private • 60s per command, not interactive")
+        return e
+
+    async def close(self) -> None:
+        self.alive = False
+        if self.conn is not None:
+            self.conn.close()
+            try:
+                await asyncio.wait_for(self.conn.wait_closed(), 5)
+            except Exception:  # noqa: BLE001
+                pass
+            self.conn = None
+
+
+class CmdModal(discord.ui.Modal, title="Run command"):
+    cmd = discord.ui.TextInput(label="Command", style=discord.TextStyle.paragraph, placeholder="ls -la /var/log",
+                               max_length=1000)
+
+    def __init__(self, view: "TermView"):
+        super().__init__()
+        self.tv = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.tv.execute(interaction, self.cmd.value)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("terminal modal error: %s", error)
+
+
+class TermView(discord.ui.View):
+    def __init__(self, owner_id: int, n: int, term: TermSession):
+        super().__init__(timeout=900)
+        self.owner_id, self.n, self.term = owner_id, n, term
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    async def on_timeout(self) -> None:
+        await self.term.close()
+        if TERMS.get(self.n) is self.term:
+            TERMS.pop(self.n, None)
+
+    async def execute(self, i: discord.Interaction, cmd: str) -> None:
+        if self.term.lock.locked():
+            await reply(i, ui("warn", "Still running", "Wait for the current command to finish."), ephemeral=True)
+            return
+        async with self.term.lock:
+            await i.response.edit_message(embed=self.term.embed(busy=cmd), view=self)
+            try:
+                await self.term.run(cmd)
+            except Exception as e:  # noqa: BLE001
+                log.warning("terminal command failed on vps%d: %s", self.n, e)
+                self.term.lines.append(f"✖ {conn_error(e)}")
+            try:
+                await i.edit_original_response(embed=self.term.embed(), view=self)
+            except discord.HTTPException as e:
+                log.warning("terminal: could not update the message: %s", e)
+
+    @discord.ui.select(placeholder="⚡ Quick commands", options=[
+        discord.SelectOption(label=lbl, value=key, emoji=ic, description=cmd[:100])
+        for key, (ic, lbl, cmd) in QUICK.items()])
+    async def quick(self, i: discord.Interaction, select: discord.ui.Select):
+        await self.execute(i, QUICK[select.values[0]][2])
+
+    @discord.ui.button(label="Run command", emoji="⌨️", style=discord.ButtonStyle.primary)
+    async def run_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(CmdModal(self))
+
+    @discord.ui.button(label="Clear", emoji="🧹", style=discord.ButtonStyle.secondary)
+    async def clear_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        self.term.lines.clear()
+        await i.response.edit_message(embed=self.term.embed(), view=self)
+
+    @discord.ui.button(label="Disconnect", emoji="🔌", style=discord.ButtonStyle.danger)
+    async def close_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await self.term.close()
+        if TERMS.get(self.n) is self.term:
+            TERMS.pop(self.n, None)
+        await i.response.edit_message(embed=ui("ok", f"Terminal closed • vps-{self.n}", "The connection was closed."), view=None)
+        self.stop()
+
+
+@app_commands.command(name="access", description="Open a private terminal for a VPS (only you can see it)")
+@app_commands.describe(vps="VPS number (see /nodes)")
+async def cmd_access(interaction: discord.Interaction, vps: int):
+    if not await guard(interaction):
+        return
+    if not vps_file(vps).exists():
+        await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/nodes` to see your VPS list."), ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    old = TERMS.pop(vps, None)
+    if old is not None:
+        await old.close()
+    term = TermSession(load_vps(vps), vps)
+    try:
+        await term.open()
+    except Exception as e:  # noqa: BLE001
+        log.warning("access to vps%d failed: %s", vps, e)
+        await term.close()
+        await interaction.edit_original_response(embed=ui("error", f"Could not open vps-{vps}", conn_error(e)))
+        return
+    TERMS[vps] = term
+    await interaction.edit_original_response(embed=term.embed(), view=TermView(interaction.user.id, vps, term))
+
+
+# ------------------------------------------------------------------ /copybackup
+# System files that would lock the bot out of the target VPS or change its identity are skipped by default.
+COPY_SKIP = ["/etc/ssh", "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow", "/etc/hostname",
+             "/etc/hosts", "/etc/fstab", "/etc/machine-id", "/etc/network", "/etc/netplan", "/etc/resolv.conf",
+             "/etc/cloud", "/boot"]
+
+
+@app_commands.command(name="copybackup", description="Copy one VPS's backup and paste it into another VPS")
+@app_commands.describe(vps="VPS number whose backup is copied", to="VPS number the copied backup is pasted into")
+async def cmd_copy(interaction: discord.Interaction, vps: int, to: int):
+    if not await guard(interaction):
+        return
+    if vps == to:
+        await reply(interaction, ui("error", "Same VPS", f"Use `/importbackup vps:{vps}` to restore a VPS onto itself."),
+                    ephemeral=True)
+        return
+    for n in (vps, to):
+        if not vps_file(n).exists():
+            await reply(interaction, ui("error", f"vps-{n} isn't added", "Use `/nodes` to see your VPS list."), ephemeral=True)
+            return
+    if not vps_has_data(interaction.guild, vps):
+        await reply(interaction, ui("error", "Nothing to copy", f"There is no backup of vps-{vps} in this server yet."),
+                    ephemeral=True)
+        return
+    skip = load_cfg().get("copy_skip", COPY_SKIP)
+    src_v, dst_v = load_vps(vps), load_vps(to)
+    view = Confirm(interaction.user.id, "Copy (overwrites files)", "Cancel")
+    await reply(interaction, ui(
+        "warn", f"Copy vps-{vps} backup → vps-{to}?",
+        f"Every file in the backup of **vps-{vps}** will be pasted into **vps-{to}** at the same paths. "
+        f"Files with the same path on vps-{to} are **overwritten**.",
+        [("📦 From (backup of)", f"vps-{vps}\n`{where_of(src_v)}`", True),
+         ("🎯 Into", f"vps-{to}\n`{where_of(dst_v)}`", True),
+         ("🛡️ Skipped on purpose", "`" + "`, `".join(skip[:14]) + "`\n(so you don't lose SSH access or the VPS identity)"),
+         ("🔔 When it's done", "I will ping you here and DM you.")]), view=view)
+    await view.wait()
+    if not view.ok:
+        return
+    bot, chan = interaction.client, interaction.channel
+    if bot.lock.locked():
+        await chan.send(embed=ui("warn", "Already busy", "Another backup/restore is running. Wait until it finishes."))
+        return
+    async with bot.lock:
+        try:
+            await run_import(interaction.guild, vps, Status(chan, f"VPS-{vps} → VPS-{to} copy"), target_n=to)
+        except Exception as e:  # noqa: BLE001
+            log.exception("copybackup failed: %s", e)
+            await chan.send(embed=ui("error", f"Copy vps-{vps} → vps-{to} failed",
+                                     f"```{str(e)[:500]}```\nSee the bot console/log."))
+
+
+for _cmd, _names in ((cmd_sshx, ("vps",)), (cmd_access, ("vps",)), (cmd_copy, ("vps", "to"))):
+    for _nm in _names:
+        _cmd.autocomplete(_nm)(cmd_info_autocomplete)
+
+
 # ------------------------------------------------------------------ bot
 class Bot(discord.Client):
     def __init__(self, cfg: dict):
@@ -1812,7 +2415,7 @@ class Bot(discord.Client):
 
     async def setup_hook(self):
         g = discord.Object(id=self.gid)
-        for c in (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_backup, cmd_import, cmd_focus):
+        for c in (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_backup, cmd_copy, cmd_import, cmd_focus):
             self.tree.add_command(c, guild=g)
         await self.tree.sync(guild=g)
         if float(self.cfg.get("interval_hours", 0)) > 0:
@@ -1879,7 +2482,8 @@ class WipeClient(discord.Client):
                 return
             talk = await ensure_talk(guild)
             await wipe_guild(guild, keep=talk)
-            await talk.send("Server is clean and private. Run `/setup` after adding a VPS (menu option 2).")
+            await talk.send(embed=ui("ok", "Server is clean and private",
+                                     "Add a VPS (menu option 2), then run `/setup` here."))
             log.info("Server is clean and private. Command channel: #%s", talk.name)
             self.code = 0
         except Exception as e:  # noqa: BLE001
@@ -2282,6 +2886,9 @@ setup_discord_bot() {
        echo
        echo "  In Discord (#talk-cmds-here):"
        echo "    /info-vps number:<n>    full VPS details (status, CPU, RAM, disk, backup coverage)"
+       echo "    /sshx vps:<n>           private sshx web-terminal link (only you see it)"
+       echo "    /access vps:<n>         private terminal inside Discord"
+       echo "    /copybackup vps:<a> to:<b>   paste the backup of VPS a into VPS b"
        echo "    /importbackup vps:<n>   restore that VPS from the backup"
        echo "    /focusbackup vps:<n>    delete the old backup and start fresh (only if you want that)"
        pause; return ;;
@@ -2502,13 +3109,13 @@ show_version() {
 
 # ---------------------------------------------------------------- Main menu
 while true; do
-  header "Main Menu"
-  echo "  ${AQUA}❯${RST} 1 Auto Backup"
-  echo "  ${AQUA}❯${RST} 2 Coming soon"
-  echo "  ${AQUA}❯${RST} 3 Version"
-  echo "  ${AQUA}❯${RST} 0 Exit"
-  echo
-  read -rp "  Select an option: " choice
+  main_header
+  mm_item 1 "💾" "Auto Backup"
+  mm_item 2 "🚧" "Coming soon"
+  mm_item 3 "🔖" "Version"
+  mm_item 0 "✕" "Exit" "" $'\e[38;5;167m'
+  mm_prompt
+  read -r choice
   case "$choice" in
     1) auto_backup_menu ;;
     2) echo "  Coming soon..."; sleep 1 ;;
