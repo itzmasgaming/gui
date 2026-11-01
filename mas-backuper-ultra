@@ -2751,6 +2751,10 @@ def brand_name() -> str:
     return f"MAS VPS | Backuper V{VERSION}"
 
 
+def main_name() -> str:
+    return f"MAS Vps Managment | V{VERSION}"
+
+
 def main_gid() -> int:
     """The main (control) server, 0 when none is set. It must be a different server than the database server."""
     cfg = load_cfg()
@@ -2904,6 +2908,34 @@ class Identity:
         finally:
             self.cycling = False
             self.handled = None
+
+    async def apply_main(self) -> None:
+        """Main server: same logo as the database server, name 'MAS Vps Managment | V<version>'."""
+        mg = self.bot.get_guild(self.bot.mid) if self.bot.mid else None
+        if mg is None:
+            return
+        try:
+            kw: dict = {}
+            name = main_name()
+            if mg.name != name:
+                kw["name"] = name
+            st = load_ident()
+            if mg.icon is None or mg.icon.key != st.get("main_icon"):
+                logo = await self.fetch_logo()
+                if logo:
+                    kw["icon"] = logo
+            if not kw:
+                return
+            ng = await mg.edit(reason="MAS main server identity", **kw)
+            if "icon" in kw:
+                st = load_ident()
+                st["main_icon"] = ng.icon.key if ng and ng.icon else None
+                save_ident(st)
+            log.info("main server identity set: %s", name)
+        except discord.Forbidden:
+            log.error("I need the Manage Server permission in the main server to change its name/logo.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not change the main server name/logo: %s", e)
 
     async def find_culprit(self, g):
         try:
@@ -3123,6 +3155,8 @@ class Bot(discord.Client):
             asyncio.create_task(self.status_loop())
             if guild is not None:
                 asyncio.create_task(self.ident.cycle())
+            if self.mid:
+                asyncio.create_task(self.ident.apply_main())
 
     async def on_guild_join(self, guild: discord.Guild):
         try:
@@ -3136,6 +3170,7 @@ class Bot(discord.Client):
                 except discord.HTTPException as e:
                     log.warning("could not add the commands to the main server: %s", e)
                 await sync_main(self, status=False)
+                asyncio.create_task(self.ident.apply_main())
         except Exception as e:  # noqa: BLE001
             log.exception("on_guild_join failed: %s", e)
 
