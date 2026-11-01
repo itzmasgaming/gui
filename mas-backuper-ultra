@@ -1571,11 +1571,13 @@ async def guard(interaction: discord.Interaction) -> bool:
     if interaction.user.id != interaction.guild.owner_id:
         await reply(interaction, ui("error", "Owner only", "Only the server owner can use this bot."), ephemeral=True)
         return False
-    talk = await ensure_talk(interaction.guild)
-    if interaction.channel_id != talk.id:
-        await reply(interaction, ui("warn", "Wrong channel", f"I only talk in {talk.mention}. Run the command there."),
-                    ephemeral=True)
-        return False
+    # Main server: commands work in ANY channel. Database (backup) server: only in #talk-cmds-here.
+    if interaction.guild_id == int(cfg.get("guild_id", 0)):
+        talk = await ensure_talk(interaction.guild)
+        if interaction.channel_id != talk.id:
+            await reply(interaction, ui("warn", "Wrong channel", f"I only talk in {talk.mention}. Run the command there."),
+                        ephemeral=True)
+            return False
     if dbg(interaction) is None or dbg(interaction).id != int(cfg.get("guild_id", 0)):
         await reply(interaction, ui("error", "Database server unavailable", "The bot isn't in the database (backup) server right now."), ephemeral=True)
         return False
