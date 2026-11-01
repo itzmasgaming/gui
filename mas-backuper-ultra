@@ -2,7 +2,7 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.4.0"
+MAS_VERSION="6.5.0"
 MAS_UPDATED="2026-11-01 22:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
@@ -111,7 +111,7 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.4.0"
+VERSION = "6.5.0"
 UPDATED = "2026-11-01 22:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
@@ -651,7 +651,7 @@ async def wipe_guild(guild: discord.Guild, keep: discord.abc.GuildChannel | None
                 log.error("could not kick %s: %s (move the bot role higher)", m, r)
             else:
                 log.info("kicked %s", m)
-    keep_ids = {c.id for c in guild.text_channels if c.name == TALK}
+    keep_ids = {c.id for c in guild.text_channels if c.name in (TALK, WARN)}
     if keep is not None:
         keep_ids.add(keep.id)
     await delete_many([c for c in guild.channels if c.id not in keep_ids], "MAS backup server wipe")
@@ -760,7 +760,7 @@ async def read_exact(f, n: int) -> bytes:
 
 
 # ------------------------------------------------------------------ GUI helpers (every message is an embed)
-FOOTER = "MAS GUI v6.4"
+FOOTER = "MAS GUI v6.5"
 _KIND = {"info": ("ℹ️", 0x00E5FF), "ok": ("✅", 0x2ECC71), "warn": ("⚠️", 0xF1C40F),
          "error": ("❌", 0xE74C3C), "wait": ("⏳", 0x3498DB)}
 
@@ -1067,13 +1067,14 @@ def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) ->
     e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
     e.add_field(name="📂 Channels used", value=f"{channels:,}", inline=True)
     e.add_field(name="🖥️ Source", value=where, inline=True)
-    e.set_footer(text="MAS GUI v6.4 • Auto Backup")
+    e.set_footer(text="MAS GUI v6.5 • Auto Backup")
     return e
 
 
 async def announce(guild: discord.Guild, channel, embed: discord.Embed, ping: bool = False) -> None:
     """Post the embed in #talk-cmds-here (the only channel the bot talks in) and DM it to the owner.
     ping=True also @mentions the owner in the channel."""
+    origin = channel if getattr(getattr(channel, "guild", None), "id", guild.id) != guild.id else None   # started from the main server
     channel = discord.utils.get(guild.text_channels, name=TALK) or channel
     owner = None
     try:
@@ -1088,6 +1089,11 @@ async def announce(guild: discord.Guild, channel, embed: discord.Embed, ping: bo
             await channel.send(embed=embed)
     except discord.HTTPException as e:
         log.error("could not post the result message: %s", e)
+    if origin is not None:
+        try:
+            await origin.send(embed=embed)
+        except discord.HTTPException as e:
+            log.warning("could not mirror the result into the main server: %s", e)
     if owner is None:
         return
     try:
@@ -1326,7 +1332,12 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n:
 
 
 async def backup_job(bot, channel, guild, nums: list[int]) -> None:
-    channel = await ensure_talk(guild)              # the bot only ever writes in #talk-cmds-here
+    talk = await ensure_talk(guild)
+    # normally the bot writes in #talk-cmds-here; a job started from the main server reports there too
+    channel = channel if getattr(getattr(channel, "guild", None), "id", guild.id) != guild.id else talk
+    if backups_locked():
+        await channel.send(embed=lock_embed())
+        return
     if bot.lock.locked():
         await channel.send(embed=ui("warn", "Already busy", "Another backup/restore is running. Wait until it finishes."))
         return
@@ -1348,7 +1359,7 @@ async def backup_job(bot, channel, guild, nums: list[int]) -> None:
                     title=f"❌  VPS-{n} backup failed",
                     description=f"```{str(e)[:500]}```\nSee the bot console/log for details.",
                     color=discord.Color(0xE74C3C), timestamp=discord.utils.utcnow())
-                err.set_footer(text="MAS GUI v6.4 • Auto Backup")
+                err.set_footer(text="MAS GUI v6.5 • Auto Backup")
                 await announce(guild, channel, err)
 
 
@@ -1383,7 +1394,8 @@ class Confirm(discord.ui.View):
 
 async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, login_text: str) -> None:
     """Shared last step of every way to add a VPS (IP + password, or Upterm)."""
-    guild = interaction.guild
+    asyncio.create_task(sync_main(interaction.client))        # new status channel in the main server
+    guild = dbg(interaction)
     if vps_has_data(guild, n):
         await (await ensure_talk(guild)).send(embed=ui(
             "warn", f"VPS-{n} added - waiting for your choice",
@@ -1544,10 +1556,17 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
         log.exception("modal error: %s", error)
 
 
+def dbg(i) -> discord.Guild:
+    """The database (backup) server. Commands typed in the main server act on this one."""
+    cl = i.client
+    return cl.get_guild(int(load_cfg().get("guild_id", 0))) or i.guild
+
+
 async def guard(interaction: discord.Interaction) -> bool:
     cfg = load_cfg()
-    if interaction.guild is None or interaction.guild_id != int(cfg.get("guild_id", 0)):
-        await reply(interaction, ui("error", "Wrong server", "This bot only works in its own backup server."), ephemeral=True)
+    ok_ids = {int(cfg.get("guild_id", 0)), main_gid()} - {0}
+    if interaction.guild is None or interaction.guild_id not in ok_ids:
+        await reply(interaction, ui("error", "Wrong server", "This bot only works in its own backup server and its main server."), ephemeral=True)
         return False
     if interaction.user.id != interaction.guild.owner_id:
         await reply(interaction, ui("error", "Owner only", "Only the server owner can use this bot."), ephemeral=True)
@@ -1556,6 +1575,9 @@ async def guard(interaction: discord.Interaction) -> bool:
     if interaction.channel_id != talk.id:
         await reply(interaction, ui("warn", "Wrong channel", f"I only talk in {talk.mention}. Run the command there."),
                     ephemeral=True)
+        return False
+    if dbg(interaction) is None or dbg(interaction).id != int(cfg.get("guild_id", 0)):
+        await reply(interaction, ui("error", "Database server unavailable", "The bot isn't in the database (backup) server right now."), ephemeral=True)
         return False
     return True
 
@@ -1575,7 +1597,7 @@ async def send_nodes(interaction: discord.Interaction) -> None:
             continue
         where = "this machine (local)" if v.get("local") else \
             remote_label(v, True)
-        if vps_has_data(interaction.guild, n) and not v.get("synced"):
+        if vps_has_data(dbg(interaction), n) and not v.get("synced"):
             st = f"⏳ waiting: `/importbackup vps:{n}` or `/focusbackup vps:{n}`"
         elif v.get("last_backup"):
             st = f"✅ last backup <t:{int(v['last_backup'])}:R>"
@@ -1591,7 +1613,7 @@ async def send_nodes(interaction: discord.Interaction) -> None:
 async def cmd_setup(interaction: discord.Interaction):
     if not await guard(interaction):
         return
-    guild, chan = interaction.guild, interaction.channel
+    guild, chan = dbg(interaction), interaction.channel
     if backups_exist(guild):
         await reply(interaction, ui(
             "warn", "Backup data already exists",
@@ -1604,8 +1626,11 @@ async def cmd_setup(interaction: discord.Interaction):
     view = Confirm(interaction.user.id, "Yes, wipe everything", "Cancel")
     await reply(interaction, ui(
         "warn", "Wipe this server?",
-        "This deletes **every channel** and kicks **every member** except the owner and this bot.\n"
-        "Backups are only created after this step.", [("⚠️ This cannot be undone", "Continue only if this server is empty of backups.")]),
+        "This deletes **every channel** and kicks **every member** of the database server except the owner and this bot.\n"
+        "Backups are only created after this step.",
+        [("⚠️ This cannot be undone", "Continue only if this server is empty of backups."),
+         ("🏠 Main server", "It is reset too: its channels are rebuilt (VPS status channels + warnings)."
+          if main_gid() else "No main server is set (menu → Auto Backup → Main server).")]),
         view=view)
     await view.wait()
     if not view.ok:
@@ -1617,9 +1642,19 @@ async def cmd_setup(interaction: discord.Interaction):
         log.exception("setup wipe failed: %s", e)
         await talk.send(embed=ui("error", "Setup stopped", f"```{str(e)[:500]}```\nNothing else was changed."))
         return
+    await ensure_warn(guild)
     await talk.send(content=interaction.user.mention,
                     embed=ui("ok", "Server cleaned", "The server is now private. Continue here in this channel."),
                     allowed_mentions=discord.AllowedMentions(users=True))
+    if main_gid():
+        try:
+            if await reset_main(interaction.client):
+                await talk.send(embed=ui("ok", "Main server reset", "Its channels were rebuilt: one status channel per VPS and a warnings channel."))
+            else:
+                await talk.send(embed=ui("warn", "Main server not reset", "The bot isn't in the main server yet. Invite it, restart the bot, then run `/setup` again."))
+        except Exception as e:  # noqa: BLE001
+            log.exception("main server reset failed: %s", e)
+            await talk.send(embed=ui("error", "Main server reset failed", f"```{str(e)[:400]}```"))
     nums = vps_numbers()
     if not nums:
         await talk.send(embed=ui("info", "No VPS added yet", "Use `/vps add` to add your first VPS."))
@@ -1662,9 +1697,12 @@ async def cmd_backup(interaction: discord.Interaction, vps: int = 0):
     if not nums or any(not vps_file(n).exists() for n in nums):
         await reply(interaction, ui("error", "No such VPS", "Add it first with `/vps add`, or check `/nodes`."), ephemeral=True)
         return
+    if backups_locked():
+        await reply(interaction, lock_embed(), ephemeral=True)
+        return
     await reply(interaction, ui("wait", "Backup started", "Progress appears below while it runs.",
                                 [("🖥️ VPS", ", ".join(f"vps-{n}" for n in nums))]))
-    await backup_job(interaction.client, interaction.channel, interaction.guild, nums)
+    await backup_job(interaction.client, interaction.channel, dbg(interaction), nums)
 
 
 @app_commands.command(name="importbackup", description="Restore a VPS's backed-up files from Discord to their old paths")
@@ -1674,7 +1712,7 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
     if not vps_file(vps).exists():
         await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/vps add` first."), ephemeral=True)
         return
-    if not vps_categories(interaction.guild, vps):
+    if not vps_categories(dbg(interaction), vps):
         await reply(interaction, ui("error", "No backup data", f"There is no backup of vps-{vps} in this server."), ephemeral=True)
         return
     view = Confirm(interaction.user.id, "Restore (overwrites files)", "Cancel")
@@ -1694,7 +1732,7 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
         return
     async with bot.lock:
         try:
-            await run_import(interaction.guild, vps, Status(chan, f"VPS-{vps} restore"))
+            await run_import(dbg(interaction), vps, Status(chan, f"VPS-{vps} restore"))
         except Exception as e:  # noqa: BLE001
             log.exception("import failed: %s", e)
             await chan.send(embed=ui("error", f"Import of vps-{vps} failed", f"```{str(e)[:500]}```\nSee the bot console/log."))
@@ -1717,7 +1755,7 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
     await view.wait()
     if not view.ok:
         return
-    guild, chan = interaction.guild, interaction.channel
+    guild, chan = dbg(interaction), interaction.channel
     nums = [vps] if vps else vps_numbers()
     if vps:
         await delete_vps_data(guild, vps)
@@ -2163,7 +2201,7 @@ def build_info_embed(n: int, v: dict, live: dict, info: dict | None, bk: dict, s
         e.add_field(name="🛡️ Backup coverage",
                     value="Can't compare files while the VPS is not connected. The numbers above come from the last backup.",
                     inline=False)
-    e.set_footer(text="MAS GUI v6.4 • /info-vps")
+    e.set_footer(text="MAS GUI v6.5 • /info-vps")
     return e
 
 
@@ -2190,7 +2228,7 @@ async def _safe_edit(inter: discord.Interaction, **kw) -> None:
 
 
 async def run_info(inter: discord.Interaction, n: int) -> None:
-    guild = inter.guild
+    guild = dbg(inter)
     try:
         v = load_vps(n)
     except Exception as e:  # noqa: BLE001
@@ -2661,7 +2699,7 @@ async def cmd_copy(interaction: discord.Interaction, vps: int, to: int):
         if not vps_file(n).exists():
             await reply(interaction, ui("error", f"vps-{n} isn't added", "Use `/nodes` to see your VPS list."), ephemeral=True)
             return
-    if not vps_has_data(interaction.guild, vps):
+    if not vps_has_data(dbg(interaction), vps):
         await reply(interaction, ui("error", "Nothing to copy", f"There is no backup of vps-{vps} in this server yet."),
                     ephemeral=True)
         return
@@ -2685,7 +2723,7 @@ async def cmd_copy(interaction: discord.Interaction, vps: int, to: int):
         return
     async with bot.lock:
         try:
-            await run_import(interaction.guild, vps, Status(chan, f"VPS-{vps} → VPS-{to} copy"), target_n=to)
+            await run_import(dbg(interaction), vps, Status(chan, f"VPS-{vps} → VPS-{to} copy"), target_n=to)
         except Exception as e:  # noqa: BLE001
             log.exception("copybackup failed: %s", e)
             await chan.send(embed=ui("error", f"Copy vps-{vps} → vps-{to} failed",
@@ -2695,6 +2733,341 @@ async def cmd_copy(interaction: discord.Interaction, vps: int, to: int):
 for _cmd, _names in ((cmd_sshx, ("vps",)), (cmd_access, ("vps",)), (cmd_copy, ("vps", "to"))):
     for _nm in _names:
         _cmd.autocomplete(_nm)(cmd_info_autocomplete)
+
+
+# ------------------------------------------------------------------ main server + database-server identity
+WARN = "warnings"                    # channel that gets the warnings (in the main AND the database server)
+VPS_CAT = "VPS"                      # category in the main server: one live-status channel per VPS
+LOGO_URL = "https://raw.githubusercontent.com/itzmasgaming/gui/main/dc-database-logo.png"
+BRAND_SUB = "Sub to ItzMASGaming"
+CONFIRM_ID = 1352328694965735635     # may always run /confirm
+MAX_CHANGES = 10                     # MORE than this many changes by one person pauses all backups
+ID_FILE = DATA_DIR / "identity.json"
+
+
+def brand_name() -> str:
+    return f"MAS VPS | Backuper V{VERSION}"
+
+
+def main_gid() -> int:
+    """The main (control) server, 0 when none is set. It must be a different server than the database server."""
+    cfg = load_cfg()
+    try:
+        m = int(cfg.get("main_guild_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return m if m != int(cfg.get("guild_id", 0) or 0) else 0
+
+
+def load_ident() -> dict:
+    try:
+        d = json.loads(ID_FILE.read_text())
+    except Exception:  # noqa: BLE001
+        d = {}
+    d.setdefault("counts", {})
+    d.setdefault("locked", False)
+    d.setdefault("offender", None)
+    return d
+
+
+def save_ident(d: dict) -> None:
+    write_private(ID_FILE, d)
+
+
+def backups_locked() -> bool:
+    return bool(load_ident().get("locked"))
+
+
+def lock_embed(st: dict | None = None) -> discord.Embed:
+    st = st or load_ident()
+    off = st.get("offender")
+    who = f"<@{off}>" if off else "someone I couldn't identify"
+    need = off or CONFIRM_ID
+    return ui("error", "Backups are paused",
+              f"The server name/logo was changed more than **{MAX_CHANGES} times** by {who}. "
+              "**No backup will run** until this is confirmed.",
+              [("▶️ To resume", f"<@{need}> must run `/confirm user:{need}`")])
+
+
+def confirm_check(st: dict, runner: int, user_text: str) -> tuple[bool, str, int | None]:
+    """Who may lift the lock: the person who caused it, or CONFIRM_ID. `user` must be the person it is about."""
+    if not st.get("locked"):
+        return False, "Backups are not paused, there is nothing to confirm.", None
+    m = re.search(r"\d{15,20}", user_text or "")
+    if not m:
+        return False, "Give a user ID, like `/confirm user:123456789012345678`.", None
+    uid, off = int(m.group(0)), st.get("offender")
+    want = off or CONFIRM_ID
+    if uid != want:
+        return False, f"That isn't the user this lock is about. It is about `{want}`.", None
+    if runner not in {CONFIRM_ID, off}:
+        return False, "Only the user who caused the lock (or the bot owner) can confirm it.", None
+    return True, "Confirmed. Backups can run again.", uid
+
+
+async def ensure_warn(guild: discord.Guild) -> discord.TextChannel:
+    ch = discord.utils.get(guild.text_channels, name=WARN)
+    return ch or await guild.create_text_channel(WARN, topic="MAS warnings: server name/logo changes and backup locks.")
+
+
+async def post_warning(bot, embed: discord.Embed) -> None:
+    """The warning goes to #warnings of the database server AND of the main server (with an @owner ping)."""
+    for gid in (bot.gid, bot.mid):
+        g = bot.get_guild(gid) if gid else None
+        if g is None:
+            continue
+        try:
+            ch = await ensure_warn(g)
+            owner = g.get_member(g.owner_id)
+            await ch.send(content=owner.mention if owner else None, embed=embed,
+                          allowed_mentions=discord.AllowedMentions(users=True))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not post the warning in %s: %s", g.name, e)
+
+
+class Identity:
+    """Gives the database server its name + logo, and guards them: checked every 10 s, put back when changed."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.cycling = False
+        self.expected_name: str | None = None
+        self.logo: bytes | None = None
+        self.last_entry = 0
+        self.handled = None
+        self.audit_warned = False
+
+    @property
+    def guild(self):
+        return self.bot.get_guild(self.bot.gid)
+
+    async def fetch_logo(self) -> bytes | None:
+        if self.logo:
+            return self.logo
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(LOGO_URL, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    if r.status == 200:
+                        self.logo = await r.read()
+                        return self.logo
+                    log.warning("logo download answered HTTP %s", r.status)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not download the server logo: %s", e)
+        return None
+
+    async def _edit(self, **kw):
+        g = self.guild
+        if g is None:
+            return None
+        try:
+            return await g.edit(reason="MAS server identity", **kw)
+        except discord.Forbidden:
+            log.error("I need the Manage Server permission to change the server name/logo.")
+        except discord.HTTPException as e:
+            log.warning("could not change the server name/logo: %s", e)
+        return None
+
+    async def cycle(self) -> None:
+        """Bot added / bot started: name -> (5 s) 'Sub to ItzMASGaming' -> (5 s) name again, and the logo."""
+        g = self.guild
+        if g is None or self.cycling:
+            return
+        self.cycling = True
+        try:
+            main = brand_name()
+            st = load_ident()
+            logo = await self.fetch_logo()
+            kw: dict = {"name": main}
+            if logo and (g.icon is None or g.icon.key != st.get("icon")):
+                kw["icon"] = logo
+            self.expected_name = main
+            ng = await self._edit(**kw) or g
+            st["icon_managed"] = bool(logo)
+            st["icon"] = ng.icon.key if ng.icon else None
+            save_ident(st)
+            await asyncio.sleep(5)
+            self.expected_name = BRAND_SUB
+            await self._edit(name=BRAND_SUB)
+            await asyncio.sleep(5)
+            self.expected_name = main
+            await self._edit(name=main)
+            for _ in range(40):                      # wait until the change has arrived before watching again
+                if self.guild is not None and self.guild.name == main:
+                    break
+                await asyncio.sleep(0.25)
+            log.info("server identity set: %s", main)
+        except Exception as e:  # noqa: BLE001
+            log.exception("server identity cycle failed: %s", e)
+        finally:
+            self.cycling = False
+            self.handled = None
+
+    async def find_culprit(self, g):
+        try:
+            async for e in g.audit_logs(limit=6, action=discord.AuditLogAction.guild_update):
+                if e.id <= self.last_entry:
+                    break
+                self.last_entry = max(self.last_entry, e.id)
+                if e.user is not None and e.user.id != self.bot.user.id:
+                    return e.user
+        except discord.Forbidden:
+            if not self.audit_warned:
+                self.audit_warned = True
+                log.warning("I can't read the audit log, so I can't tell WHO changed the server. Give the bot 'View Audit Log'.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("audit log lookup failed: %s", e)
+        return None
+
+    async def watch(self) -> None:
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await asyncio.sleep(10)
+            try:
+                await self.check()
+            except Exception as e:  # noqa: BLE001
+                log.exception("identity check failed: %s", e)
+
+    def _bad(self, g, st) -> tuple[bool, bool]:
+        icon = g.icon.key if g.icon else None
+        return g.name != self.expected_name, bool(st.get("icon_managed")) and icon != st.get("icon")
+
+    async def check(self) -> None:
+        g = self.guild
+        if g is None or self.cycling or self.expected_name is None:
+            return
+        st = load_ident()
+        name_bad, icon_bad = self._bad(g, st)
+        if not (name_bad or icon_bad):
+            self.handled = None
+            return
+        seen = (g.name, g.icon.key if g.icon else None)
+        if self.handled == seen:                     # already warned about exactly this, and couldn't fix it
+            return
+        await asyncio.sleep(2)                       # not just our own edit still arriving?
+        g = self.guild
+        st = load_ident()
+        name_bad, icon_bad = self._bad(g, st)
+        if not (name_bad or icon_bad) or self.cycling:
+            return
+        self.handled = seen
+        who = await self.find_culprit(g)
+        key = str(who.id) if who else "unknown"
+        st["counts"][key] = int(st["counts"].get(key, 0)) + 1
+        n = st["counts"][key]
+        save_ident(st)
+        lines = []
+        if name_bad:
+            lines.append(f"**Name:** `{g.name}` (it must be `{self.expected_name}`)")
+        if icon_bad:
+            lines.append("**Logo:** it was changed")
+        fixed = False
+        self.cycling = True                          # don't count our own repair
+        try:
+            kw: dict = {}
+            if name_bad:
+                kw["name"] = self.expected_name
+            if icon_bad:
+                logo = await self.fetch_logo()
+                if logo:
+                    kw["icon"] = logo
+            if kw:
+                ng = await self._edit(**kw)
+                fixed = ng is not None
+                if fixed and "icon" in kw:
+                    st = load_ident()
+                    st["icon"] = ng.icon.key if ng.icon else None
+                    save_ident(st)
+        finally:
+            self.cycling = False
+        if fixed:
+            self.handled = None
+        who_txt = f"<@{who.id}> (`{who.id}`)" if who else "unknown (give the bot **View Audit Log** to see who)"
+        await post_warning(self.bot, ui(
+            "warn", "Server name/logo was changed", "\n".join(lines),
+            [("👤 Changed by", who_txt, True), ("🔢 Their changes", f"{n}/{MAX_CHANGES}", True),
+             ("🛠️ Fixed", "✅ I put it back" if fixed else "❌ I couldn't (needs Manage Server)", True)]))
+        st = load_ident()
+        if n > MAX_CHANGES and not st.get("locked"):
+            st["locked"], st["offender"], st["locked_at"] = True, (who.id if who else None), int(time.time())
+            save_ident(st)
+            log.warning("backups paused: server name/logo changed %d times by %s", n, key)
+            await post_warning(self.bot, lock_embed(st))
+
+
+@app_commands.command(name="confirm", description="Resume backups after they were paused for changing the server name/logo")
+@app_commands.describe(user="ID of the user the pause is about (shown in the warning)")
+async def cmd_confirm(interaction: discord.Interaction, user: str):
+    cfg = load_cfg()
+    if interaction.guild_id not in ({int(cfg.get("guild_id", 0)), main_gid()} - {0}):
+        await reply(interaction, ui("error", "Wrong server", "Use this in the backup server or the main server."), ephemeral=True)
+        return
+    st = load_ident()
+    ok, text, uid = confirm_check(st, interaction.user.id, user)
+    if not ok:
+        await reply(interaction, ui("error", "Not confirmed", text), ephemeral=True)
+        return
+    st["locked"], st["offender"] = False, None
+    st["counts"][str(uid)] = 0
+    save_ident(st)
+    log.info("backups resumed, confirmed by %s", interaction.user.id)
+    await reply(interaction, ui("ok", "Backups resumed", text), ephemeral=True)
+    await post_warning(interaction.client, ui("ok", "Backups resumed", f"<@{interaction.user.id}> confirmed. Backups run again."))
+
+
+# ---- main server: control panel + one live status channel per VPS
+async def post_status(bot, ch: discord.TextChannel, embed: discord.Embed) -> None:
+    async for m in ch.history(limit=10):
+        if m.author.id == bot.user.id:
+            await m.edit(embed=embed)
+            return
+    await ch.send(embed=embed)
+
+
+async def sync_main(bot, status: bool = True) -> None:
+    """Main server: VPS category + one channel per VPS (vps-1 shows the status of vps 1). Safe to run any time."""
+    mg, dg = bot.get_guild(main_gid()), bot.get_guild(bot.gid)
+    if mg is None or dg is None:
+        return
+    await ensure_talk(mg)
+    await ensure_warn(mg)
+    cat = discord.utils.get(mg.categories, name=VPS_CAT) or await mg.create_category(VPS_CAT)
+    every = max(30, int(bot.cfg.get("status_seconds", 120)))
+    chans = {}
+    for n in vps_numbers():
+        name = f"vps-{n}"
+        chans[n] = discord.utils.get(cat.text_channels, name=name) or await mg.create_text_channel(
+            name, category=cat, topic=f"Live status of vps-{n}. Refreshes every {every} s.")
+    if not status:
+        return
+    sem = asyncio.Semaphore(3)
+
+    async def one(n: int) -> None:
+        async with sem:
+            try:
+                v = load_vps(n)
+                live = await fetch_live(v)
+                info = parse_info(live["raw"]) if live.get("raw") else None
+                emb = build_info_embed(n, v, live, info, backup_totals(dg, n), None, None, bot.lock.locked())
+                if backups_locked():
+                    emb.add_field(name="🛑 Backups paused", value="The server name/logo was changed too often. See #warnings. `/confirm` resumes.", inline=False)
+                emb.set_footer(text=f"{FOOTER} • live status, refreshes every {every} s")
+                await post_status(bot, chans[n], emb)
+            except Exception as e:  # noqa: BLE001
+                log.warning("status of vps-%s could not be updated: %s", n, e)
+
+    await asyncio.gather(*(one(n) for n in chans))
+
+
+async def reset_main(bot) -> bool:
+    """/setup also resets the main server: every channel is deleted (except the command channel) and rebuilt."""
+    mg = bot.get_guild(main_gid())
+    if mg is None:
+        return False
+    talk = await ensure_talk(mg)
+    await delete_many([c for c in mg.channels if c.id != talk.id], "MAS main server reset")
+    await sync_main(bot)
+    return True
 
 
 # ------------------------------------------------------------------ bot
@@ -2707,12 +3080,21 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.lock = asyncio.Lock()
         self.gid = int(cfg["guild_id"])
+        self.mid = main_gid()                       # 0 = no main server
+        self.ident = Identity(self)
+        self._started = False
 
     async def setup_hook(self):
-        g = discord.Object(id=self.gid)
-        for c in (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_backup, cmd_copy, cmd_import, cmd_focus):
-            self.tree.add_command(c, guild=g)
-        await self.tree.sync(guild=g)
+        cmds = (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_backup, cmd_copy, cmd_import,
+                cmd_focus, cmd_confirm)
+        for gid in [self.gid] + ([self.mid] if self.mid else []):
+            g = discord.Object(id=gid)
+            for c in cmds:
+                self.tree.add_command(c, guild=g)
+            try:
+                await self.tree.sync(guild=g)
+            except discord.HTTPException as e:
+                log.warning("could not add the commands to server %s (is the bot in it?): %s", gid, e)
         if float(self.cfg.get("interval_hours", 0)) > 0:
             asyncio.create_task(self.auto_loop())
 
@@ -2724,12 +3106,48 @@ class Bot(discord.Client):
         else:
             try:
                 await ensure_talk(guild)
+                await ensure_warn(guild)
             except Exception as e:  # noqa: BLE001
                 log.error("could not create #%s: %s", TALK, e)
+        if self.mid and self.get_guild(self.mid) is None:
+            log.warning("Bot isn't in the main server (%s). Invite it, then restart.", self.mid)
         for g in self.guilds:
-            if g.id != self.gid:
+            if g.id not in (self.gid, self.mid):
                 log.warning("leaving unexpected server %s", g.name)
                 await g.leave()
+        if not self._started:                       # on_ready can fire again after a reconnect
+            self._started = True
+            asyncio.create_task(self.ident.watch())
+            asyncio.create_task(self.status_loop())
+            if guild is not None:
+                asyncio.create_task(self.ident.cycle())
+
+    async def on_guild_join(self, guild: discord.Guild):
+        try:
+            if guild.id == self.gid:
+                await ensure_talk(guild)
+                await ensure_warn(guild)
+                asyncio.create_task(self.ident.cycle())          # new name + logo as soon as the bot is added
+            elif guild.id == self.mid:
+                try:
+                    await self.tree.sync(guild=discord.Object(id=guild.id))
+                except discord.HTTPException as e:
+                    log.warning("could not add the commands to the main server: %s", e)
+                await sync_main(self, status=False)
+        except Exception as e:  # noqa: BLE001
+            log.exception("on_guild_join failed: %s", e)
+
+    async def status_loop(self):
+        await self.wait_until_ready()
+        if not self.mid:
+            return
+        every = max(30, int(self.cfg.get("status_seconds", 120)))
+        while not self.is_closed():
+            try:
+                await sync_main(self)
+            except Exception as e:  # noqa: BLE001
+                log.warning("main server status update failed: %s", e)
+            await asyncio.sleep(every)
 
     async def on_member_join(self, member: discord.Member):
         if member.guild.id != self.gid or member.id in allowed_ids(member.guild):
@@ -2849,7 +3267,8 @@ class CheckClient(discord.Client):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["set-token", "migrate-token", "set-guild", "invite", "wipe",
-                                    "add-local", "add-vps", "check", "inspect", "protect", "run"])
+                                    "add-local", "add-vps", "check", "inspect", "protect", "run",
+                                    "set-main-guild", "check-main"])
     args = ap.parse_args()
     setup_logging()
     cfg = load_cfg()
@@ -2876,6 +3295,15 @@ def main() -> int:
 
     if args.cmd == "set-guild":
         cfg["guild_id"] = int(os.environ["MAS_GUILD"])
+        save_cfg(cfg)
+        return 0
+
+    if args.cmd == "set-main-guild":
+        mid = int(os.environ["MAS_MAIN_GUILD"])
+        if mid == int(cfg.get("guild_id", 0) or 0):
+            log.error("The main server must be a DIFFERENT server than the database (backup) server.")
+            return 1
+        cfg["main_guild_id"] = mid
         save_cfg(cfg)
         return 0
 
@@ -2912,7 +3340,7 @@ def main() -> int:
         perms = discord.Permissions(
             view_channel=True, send_messages=True, embed_links=True, attach_files=True,
             read_message_history=True, manage_channels=True, manage_guild=True,
-            manage_roles=True, kick_members=True)
+            manage_roles=True, kick_members=True, view_audit_log=True)
         print(discord.utils.oauth_url(client_id_from_token(token), permissions=perms,
                                       scopes=("bot", "applications.commands")))
         return 0
@@ -2922,6 +3350,13 @@ def main() -> int:
         return 1
 
     try:
+        if args.cmd == "check-main":
+            if not cfg.get("main_guild_id"):
+                log.error("No main server is set yet.")
+                return 1
+            c = CheckClient(int(cfg["main_guild_id"]))
+            c.run(token, log_handler=None)
+            return c.code
         if args.cmd == "check":
             c = CheckClient(int(cfg["guild_id"]))
             c.run(token, log_handler=None)
@@ -3333,6 +3768,44 @@ update_bot() {
   pause
 }
 
+# ---------------------------------------------------------------- 4) Main server
+setup_main_server() {
+  header "Main Server"
+  ensure_env || { pause; return; }
+  if ! grep -q '"guild_id"' "$DATA_DIR/config.json" 2>/dev/null; then
+    err "Run option 1 (Setup Discord bot) first."; pause; return
+  fi
+  echo "  The ${BOLD}main server${RST} is your control panel:"
+  echo "    ${MM_NUM}•${RST} a ${BOLD}VPS${RST} category with one channel per VPS showing its live status"
+  echo "    ${MM_NUM}•${RST} run every command from there, it controls the database (backup) server"
+  echo "    ${MM_NUM}•${RST} a ${BOLD}warnings${RST} channel (the database server has one too)"
+  echo
+  echo "  Invite the bot to the ${BOLD}main server${RST} with this link:"
+  echo
+  "$PY" "$BOT" invite
+  echo
+  read -rp "  ${MM_TITLE}Main server ID (17-20 digits):${RST} " mid
+  if ! [[ "$mid" =~ ^[0-9]{17,20}$ ]]; then
+    err "That doesn't look like a Discord server ID."; pause; return
+  fi
+  MAS_MAIN_GUILD="$mid" "$PY" "$BOT" set-main-guild || { pause; return; }
+  ok "Main server saved."
+  echo "  Checking if the bot is in the main server..."
+  if "$PY" "$BOT" check-main; then
+    ok "The bot is in the main server."
+  else
+    warn "The bot isn't in the main server yet. Add it with the link above, then run this option again."
+  fi
+  echo
+  if bot_running; then
+    warn "Restart the bot to apply it: option 6 (Stop bot), then option 5 (Start bot)."
+  else
+    echo "  Start the bot with option 5. It builds the VPS channels by itself."
+  fi
+  echo "  In Discord, ${BOLD}/setup${RST} also resets the main server and rebuilds it."
+  pause
+}
+
 # ---------------------------------------------------------------- Auto Backup menu
 auto_backup_menu() {
   while true; do
@@ -3340,7 +3813,7 @@ auto_backup_menu() {
     mm_item 1 "🤖" "Setup Discord bot"
     mm_item 2 "📥" "Setup LVIB (Load VPS into bot)"
     mm_item 3 "📜" "Bot status / logs"
-    mm_item 4 "🚧" "Coming soon"
+    mm_item 4 "🏠" "Main server (control + status)"
     mm_item 5 "🚀" "Start bot"
     mm_item 6 "🛑" "Stop bot"
     mm_item 7 "🔄" "Update bot"
@@ -3351,7 +3824,7 @@ auto_backup_menu() {
       1) setup_discord_bot ;;
       2) setup_lvib ;;
       3) bot_status ;;
-      4) echo "  ${YLW}🚧 Coming soon...${RST}"; sleep 1 ;;
+      4) setup_main_server ;;
       5) start_bot_menu ;;
       6) stop_bot ;;
       7) update_bot ;;
