@@ -2,6 +2,11 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -fsSL https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-discord-bot-backuper.txt)
 
+MAS_VERSION="6.1.0"
+MAS_UPDATED="2026-11-01 05:48 UTC"
+MAS_REPO="itzmasgaming/gui"
+MAS_FILE="mas-discord-bot-backuper.txt"
+
 AQUA=$'\e[38;5;51m'; RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BOLD=$'\e[1m'; RST=$'\e[0m'
 W=48
 
@@ -21,7 +26,7 @@ center() {
 header() {
   local sub="$1" line
   line="$(printf '━%.0s' $(seq 1 $W))"
-  clear
+  command -v clear >/dev/null 2>&1 && clear || printf '\033c'
   echo
   echo "${AQUA}┏${line}┓"
   center ""
@@ -79,6 +84,9 @@ from pathlib import Path
 import asyncssh
 import discord
 from discord import app_commands
+
+VERSION = "6.1.0"
+UPDATED = "2026-11-01 05:48 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -765,6 +773,63 @@ class Backup:
         await self.flush_records(force=True)
 
 
+def fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def fmt_time(sec: float) -> str:
+    sec = int(sec)
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}h {m}m {s}s" if h else (f"{m}m {s}s" if m else f"{s}s")
+
+
+def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) -> discord.Embed:
+    clean = s["failed"] == 0
+    e = discord.Embed(
+        title=f"{'✅' if clean else '⚠️'}  VPS-{vps_n} backup {'complete' if clean else 'finished with errors'}",
+        description=(f"Everything from **vps-{vps_n}** is now safely stored in this server."
+                     if clean else
+                     f"**vps-{vps_n}** was backed up, but some files failed. Details are in the bot console/log."),
+        color=discord.Color(0x00E5FF if clean else 0xF1C40F),
+        timestamp=discord.utils.utcnow(),
+    )
+    where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+    speed = s["bytes"] / elapsed if elapsed > 0 else 0
+    e.add_field(name="📁 Files saved", value=f"{s['ok']:,}", inline=True)
+    e.add_field(name="⏭️ Unchanged", value=f"{s['skipped']:,}", inline=True)
+    e.add_field(name="❌ Failed", value=f"{s['failed']:,}", inline=True)
+    e.add_field(name="💾 Data", value=fmt_bytes(s["bytes"]), inline=True)
+    e.add_field(name="⏱️ Time", value=fmt_time(elapsed), inline=True)
+    e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
+    e.add_field(name="📂 Channels used", value=f"{channels:,}", inline=True)
+    e.add_field(name="🖥️ Source", value=where, inline=True)
+    e.set_footer(text="MAS GUI v6.0 • Auto Backup")
+    return e
+
+
+async def announce(guild: discord.Guild, channel, embed: discord.Embed) -> None:
+    """Post the embed in the channel and DM it to the server owner."""
+    try:
+        await channel.send(embed=embed)
+    except discord.HTTPException as e:
+        log.error("could not post the result message: %s", e)
+    try:
+        owner = guild.get_member(guild.owner_id) or await guild.fetch_member(guild.owner_id)
+        dm = embed.copy()
+        dm.add_field(name="🔗 Open", value=f"[Go to #{channel.name}]({channel.jump_url})", inline=False)
+        await owner.send(embed=dm)
+        log.info("DM sent to the owner")
+    except discord.Forbidden:
+        log.warning("Could not DM the owner (their DMs are closed for server members).")
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not DM the owner: %s", e)
+
+
 async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     v, cfg = load_vps(vps_n), load_cfg()
     excl = cfg.get("exclude", DEFAULT_EXCLUDE)
@@ -798,6 +863,8 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     await status.update(
         f"vps-{vps_n} DONE in {time.monotonic() - t0:.0f}s - {s['ok']} saved, {s['skipped']} unchanged, "
         f"{s['failed']} failed, {s['bytes'] / 1048576:.1f} MB", force=True)
+    await announce(guild, status.channel,
+                   backup_embed(vps_n, v, s, time.monotonic() - t0, len(bk.cache)))
 
 
 # ------------------------------------------------------------------ restore
@@ -958,7 +1025,12 @@ async def backup_job(bot, channel, guild, nums: list[int]) -> None:
                 await run_backup(guild, n, Status(channel, f"vps-{n}"))
             except Exception as e:  # noqa: BLE001
                 log.exception("backup of vps%d crashed: %s", n, e)
-                await channel.send(f"❌ vps-{n} backup failed: `{e}` (see console)")
+                err = discord.Embed(
+                    title=f"❌  VPS-{n} backup failed",
+                    description=f"```{str(e)[:500]}```\nSee the bot console/log for details.",
+                    color=discord.Color(0xE74C3C), timestamp=discord.utils.utcnow())
+                err.set_footer(text="MAS GUI v6.0 • Auto Backup")
+                await announce(guild, channel, err)
 
 
 # ------------------------------------------------------------------ UI
@@ -1216,7 +1288,7 @@ class Bot(discord.Client):
             asyncio.create_task(self.auto_loop())
 
     async def on_ready(self):
-        log.info("Bot online as %s", self.user)
+        log.info("Bot online as %s (MAS bot v%s, updated %s)", self.user, VERSION, UPDATED)
         guild = self.get_guild(self.gid)
         if guild is None:
             log.warning("Bot isn't in the configured server (%s). Invite it, then restart.", self.gid)
@@ -1392,18 +1464,89 @@ if __name__ == "__main__":
 MAS_BOT_EOF
 }
 
-SELF_URL="${MAS_SELF_URL:-https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-discord-bot-backuper.txt}"
+SELF_URL="${MAS_SELF_URL:-https://raw.githubusercontent.com/$MAS_REPO/main/$MAS_FILE}"
+
+run_quiet() {   # run a command, keep its output in install.log, show the tail only on failure
+  mkdir -p "$DATA_DIR"
+  "$@" >> "$DATA_DIR/install.log" 2>&1 || { tail -n 8 "$DATA_DIR/install.log" | sed 's/^/    /'; return 1; }
+}
+
+# pkg_install base|build  -> installs system packages with whatever package manager the VPS has
+pkg_install() {
+  local S="" pk
+  if [[ $EUID -ne 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || { err "Root is needed to install packages. Re-run as root (sudo -i)."; return 1; }
+    S="sudo"
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    case "$1" in
+      base)  pk="python3 python3-venv python3-pip curl ca-certificates" ;;
+      build) pk="build-essential python3-dev libffi-dev libssl-dev" ;;
+    esac
+    run_quiet $S env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq || return 1
+    run_quiet $S env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq -o DPkg::Lock::Timeout=180 $pk
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    local pm="dnf"; command -v dnf >/dev/null 2>&1 || pm="yum"
+    case "$1" in
+      base)  pk="python3 python3-pip curl ca-certificates" ;;
+      build) pk="gcc python3-devel libffi-devel openssl-devel" ;;
+    esac
+    run_quiet $S $pm install -y -q $pk
+  elif command -v apk >/dev/null 2>&1; then
+    case "$1" in
+      base)  pk="python3 py3-pip curl ca-certificates" ;;
+      build) pk="build-base python3-dev libffi-dev openssl-dev" ;;
+    esac
+    run_quiet $S apk add --no-cache $pk
+  elif command -v pacman >/dev/null 2>&1; then
+    case "$1" in
+      base)  pk="python python-pip curl ca-certificates" ;;
+      build) pk="base-devel" ;;
+    esac
+    run_quiet $S pacman -Sy --noconfirm --needed $pk
+  elif command -v zypper >/dev/null 2>&1; then
+    case "$1" in
+      base)  pk="python3 python3-pip curl ca-certificates" ;;
+      build) pk="gcc python3-devel libffi-devel libopenssl-devel" ;;
+    esac
+    run_quiet $S zypper -n install $pk
+  else
+    err "Unknown package manager. Install python3 (3.9+), venv, pip and curl manually."
+    return 1
+  fi
+}
 
 ensure_deps() {
   mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
-  command -v python3 >/dev/null || { err "python3 is required (apt install python3 python3-venv)"; return 1; }
-  if [[ ! -x "$PY" ]]; then
-    echo "  Creating Python environment..."
-    python3 -m venv "$DATA_DIR/venv" || { err "Could not create venv (apt install python3-venv)"; return 1; }
+
+  # 1) system packages (python3 + venv + pip + curl) - installed automatically if missing
+  if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
+     || ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+    echo "  Installing system packages (python3, venv, pip, curl)... this can take a minute"
+    pkg_install base || { err "Could not install the required system packages."; return 1; }
   fi
+  if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    err "Python 3.9 or newer is required (found $(python3 -V 2>&1)). Use a newer OS image."
+    return 1
+  fi
+
+  # 2) virtual environment (a half-created one without pip is rebuilt)
+  if [[ ! -x "$DATA_DIR/venv/bin/python" || ! -x "$DATA_DIR/venv/bin/pip" || ! -f "$DATA_DIR/venv/pyvenv.cfg" ]]; then
+    echo "  Creating Python environment..."
+    rm -rf "$DATA_DIR/venv"
+    python3 -m venv "$DATA_DIR/venv" >> "$DATA_DIR/install.log" 2>&1 || {
+      pkg_install base && rm -rf "$DATA_DIR/venv" && python3 -m venv "$DATA_DIR/venv" >> "$DATA_DIR/install.log" 2>&1
+    } || { err "Could not create the Python environment (see $DATA_DIR/install.log)."; return 1; }
+  fi
+
+  # 3) python libraries (build tools are installed only if a wheel isn't available for this CPU)
   if ! "$PY" -c "import discord, asyncssh" 2>/dev/null; then
     echo "  Installing discord.py + asyncssh..."
-    "$DATA_DIR/venv/bin/pip" install -q -U discord.py asyncssh || { err "pip install failed"; return 1; }
+    if ! run_quiet "$PY" -m pip install -q -U pip discord.py asyncssh; then
+      echo "  Installing build tools and retrying..."
+      pkg_install build && run_quiet "$PY" -m pip install -q -U discord.py asyncssh \
+        || { err "pip install failed (see $DATA_DIR/install.log)"; return 1; }
+    fi
   fi
   return 0
 }
@@ -1695,17 +1838,58 @@ auto_backup_menu() {
   done
 }
 
+# ---------------------------------------------------------------- 3) Version
+show_version() {
+  header "Version"
+  local latest_ver latest_date iso bot_ver api
+  api="${MAS_API_URL:-https://api.github.com/repos/$MAS_REPO/commits?path=$MAS_FILE&per_page=1}"
+
+  bot_ver="$(grep -m1 '^VERSION = ' "$BOT" 2>/dev/null | cut -d'"' -f2)"
+  echo "  ${BOLD}This copy${RST}"
+  echo "    Menu : v$MAS_VERSION   (built $MAS_UPDATED)"
+  if [[ -n "$bot_ver" ]]; then echo "    Bot  : v$bot_ver"; else echo "    Bot  : not installed yet (use option 1)"; fi
+  echo
+  echo "  Checking GitHub for the latest version..."
+  local remote
+  remote="$(curl -fsSL --max-time 10 "$SELF_URL?$(date +%s)" 2>/dev/null)"
+  latest_ver="$(printf '%s\n' "$remote" | grep -m1 '^MAS_VERSION=' | cut -d'"' -f2)"
+  latest_date="$(printf '%s\n' "$remote" | grep -m1 '^MAS_UPDATED=' | cut -d'"' -f2)"
+  # the commit time on GitHub is the real "last updated" moment, when it can be read
+  iso="$(curl -fsSL --max-time 10 "$api" 2>/dev/null | grep -o '"date": *"[^"]*"' | tail -n1 | cut -d'"' -f4)"
+  if [[ -n "$iso" ]]; then
+    latest_date="$(date -u -d "$iso" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "${iso/T/ } UTC")"
+  fi
+  echo
+  if [[ -z "$latest_ver" ]]; then
+    warn "Could not reach GitHub (offline, or the file moved)."
+  else
+    echo "  ${BOLD}Latest on GitHub${RST}"
+    echo "    v$latest_ver   (updated $latest_date)"
+    echo
+    if [[ "$latest_ver" == "$MAS_VERSION" ]]; then
+      ok "You're up to date."
+    elif [[ "$(printf '%s\n%s\n' "$MAS_VERSION" "$latest_ver" | sort -V | tail -n1)" == "$latest_ver" ]]; then
+      warn "A newer version is available: run the command again, then use Auto Backup -> 7 (Update bot)."
+    else
+      ok "This copy is newer than what is on GitHub."
+    fi
+  fi
+  pause
+}
+
 # ---------------------------------------------------------------- Main menu
 while true; do
   header "Main Menu"
   echo "  ${AQUA}❯${RST} 1 Auto Backup"
   echo "  ${AQUA}❯${RST} 2 Coming soon"
+  echo "  ${AQUA}❯${RST} 3 Version"
   echo "  ${AQUA}❯${RST} 0 Exit"
   echo
   read -rp "  Select an option: " choice
   case "$choice" in
     1) auto_backup_menu ;;
     2) echo "  Coming soon..."; sleep 1 ;;
+    3) show_version ;;
     0) clear; exit 0 ;;
     *) err "Invalid option"; sleep 1 ;;
   esac
