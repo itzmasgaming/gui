@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -fsSL https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-discord-bot-backuper.txt)
 
-MAS_VERSION="6.1.0"
-MAS_UPDATED="2026-11-01 05:48 UTC"
+MAS_VERSION="6.1.1"
+MAS_UPDATED="2026-11-01 05:59 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-discord-bot-backuper.txt"
 
@@ -58,6 +58,8 @@ CLI (used by the menu):
   add-local      add THIS machine as a VPS (no IP/password needed)
   add-vps        add a remote VPS from env MAS_V_HOST/PORT/USER/PASS (tests SSH first)
   check          exit 0 if the bot is in the configured server, 3 if not
+  inspect        read-only: 0 = empty server, 4 = backup data found, 3 = bot not in server
+  protect        make a server that has backups private without deleting anything
   run            start the bot (/setup /vps add /vps list /nodes /backup /importbackup /focusbackup)
 """
 from __future__ import annotations
@@ -85,8 +87,8 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.1.0"
-UPDATED = "2026-11-01 05:48 UTC"
+VERSION = "6.1.1"
+UPDATED = "2026-11-01 05:59 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -379,14 +381,32 @@ def allowed_ids(guild: discord.Guild) -> set[int]:
     return {guild.owner_id, guild.me.id, *[int(x) for x in cfg.get("allowed_user_ids", [])]}
 
 
+def backup_findings(guild: discord.Guild) -> list[str]:
+    """Everything in this server that shows backup data exists (empty list = nothing to lose)."""
+    found = []
+    if discord.utils.get(guild.text_channels, name=MARKER):
+        found.append(f"#{MARKER}")
+    if discord.utils.get(guild.text_channels, name=RECORDS):
+        found.append(f"#{RECORDS}")
+    for c in guild.categories:
+        if c.name == SYSTEM_CAT or re.fullmatch(r"vps-\d+(-\d+)?", c.name):
+            found.append(f"category {c.name}")
+    return found
+
+
 def backups_exist(guild: discord.Guild) -> bool:
-    return discord.utils.get(guild.text_channels, name=MARKER) is not None
+    return bool(backup_findings(guild))
 
 
 def vps_categories(guild: discord.Guild, vps: int) -> list[discord.CategoryChannel]:
     pat = re.compile(rf"vps-{vps}(-\d+)?")
     cats = [c for c in guild.categories if pat.fullmatch(c.name)]
     return sorted(cats, key=lambda c: (len(c.name), c.name))
+
+
+def vps_has_data(guild: discord.Guild, vps: int) -> bool:
+    """True if vps-N holds backed-up files (a category with only the empty index channel doesn't count)."""
+    return any(ch.name != RECORDS for cat in vps_categories(guild, vps) for ch in cat.channels)
 
 
 async def delete_many(items, reason: str, batch: int = 5) -> None:
@@ -408,6 +428,10 @@ async def ensure_talk(guild: discord.Guild) -> discord.TextChannel:
 
 
 async def wipe_guild(guild: discord.Guild, keep: discord.abc.GuildChannel | None = None) -> None:
+    found = backup_findings(guild)
+    if found:
+        raise RuntimeError("Refusing to wipe: this server contains backup data (" + ", ".join(found[:6]) +
+                           "). Nothing was deleted. Use /focusbackup to delete backups on purpose.")
     allowed = allowed_ids(guild)
     log.info("Wiping %s (%s)", guild.name, guild.id)
     victims = []
@@ -1016,7 +1040,7 @@ async def backup_job(bot, channel, guild, nums: list[int]) -> None:
         for n in nums:
             try:
                 v = load_vps(n)
-                if not v.get("synced") and vps_categories(guild, n):
+                if not v.get("synced") and vps_has_data(guild, n):
                     await channel.send(
                         f"⏳ **vps-{n}** already has backup data in this server. Choose first: "
                         f"`/importbackup vps:{n}` (restore it onto this VPS) or "
@@ -1077,7 +1101,7 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
             save_vps(n, v)
             guild = interaction.guild
             log.info("VPS %d added via /vps add", n)
-            if vps_categories(guild, n):
+            if vps_has_data(guild, n):
                 msg = (f"⏳ **vps-{n}** was added, but a `vps-{n}` category with old backup data already "
                        f"exists. Waiting for you: `/importbackup vps:{n}` (restore it onto this VPS) or "
                        f"`/focusbackup vps:{n}` (delete it and start fresh).")
@@ -1086,6 +1110,8 @@ class VpsAddModal(discord.ui.Modal, title="Add VPS"):
             else:
                 await ensure_category(guild, n)
                 await records_channel(guild, n)
+                v["synced"] = True            # nothing old to decide about: first backup can start
+                save_vps(n, v)
                 await interaction.followup.send(
                     f"✅ vps-{n} added. Run `/backup vps:{n}` to start backing it up.", ephemeral=True)
         except Exception as e:  # noqa: BLE001
@@ -1122,7 +1148,7 @@ async def send_nodes(interaction: discord.Interaction) -> None:
             continue
         where = "this machine (local)" if v.get("local") else \
             f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
-        if vps_categories(interaction.guild, n) and not v.get("synced"):
+        if vps_has_data(interaction.guild, n) and not v.get("synced"):
             st = f"⏳ waiting: `/importbackup vps:{n}` or `/focusbackup vps:{n}`"
         elif v.get("last_backup"):
             st = f"✅ last backup <t:{int(v['last_backup'])}:R>"
@@ -1341,6 +1367,11 @@ class WipeClient(discord.Client):
             if guild is None:
                 log.error("The bot is not in that server. Invite it first (option 1 prints the link).")
                 return
+            found = backup_findings(guild)
+            if found:                                   # look BEFORE touching anything
+                log.error("Backup data found (%s). Nothing was deleted.", ", ".join(found[:6]))
+                self.code = 4
+                return
             talk = await ensure_talk(guild)
             await wipe_guild(guild, keep=talk)
             await talk.send("Server is clean and private. Run `/setup` after adding a VPS (menu option 2).")
@@ -1348,6 +1379,52 @@ class WipeClient(discord.Client):
             self.code = 0
         except Exception as e:  # noqa: BLE001
             log.exception("wipe failed: %s", e)
+        finally:
+            await self.close()
+
+
+class InspectClient(discord.Client):
+    """Read-only: exit 0 = empty server, 4 = backup data found, 3 = bot not in the server."""
+
+    def __init__(self, gid: int):
+        super().__init__(intents=discord.Intents.default())
+        self.gid, self.code = gid, 3
+
+    async def on_ready(self):
+        g = self.get_guild(self.gid)
+        if g:
+            found = backup_findings(g)
+            if found:
+                log.info("Existing backup data found: %s", ", ".join(found[:8]))
+                self.code = 4
+            else:
+                log.info("No backup data in this server.")
+                self.code = 0
+        await self.close()
+
+
+class ProtectClient(discord.Client):
+    """Makes a server with backups private WITHOUT deleting anything or kicking anyone."""
+
+    def __init__(self, gid: int):
+        super().__init__(intents=discord.Intents.default())
+        self.gid, self.code = gid, 1
+
+    async def on_ready(self):
+        try:
+            g = self.get_guild(self.gid)
+            if g:
+                await ensure_talk(g)
+                try:
+                    for inv in await g.invites():
+                        await inv.delete(reason="MAS backup server is private")
+                    await g.default_role.edit(permissions=discord.Permissions.none(), reason="MAS private server")
+                except Exception as e:  # noqa: BLE001
+                    log.error("could not fully lock the server: %s", e)
+                log.info("Server kept as is (nothing deleted). Command channel: #%s", TALK)
+                self.code = 0
+        except Exception as e:  # noqa: BLE001
+            log.exception("protect failed: %s", e)
         finally:
             await self.close()
 
@@ -1368,7 +1445,7 @@ class CheckClient(discord.Client):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["set-token", "migrate-token", "set-guild", "invite", "wipe",
-                                    "add-local", "add-vps", "check", "run"])
+                                    "add-local", "add-vps", "check", "inspect", "protect", "run"])
     args = ap.parse_args()
     setup_logging()
     cfg = load_cfg()
@@ -1443,6 +1520,10 @@ def main() -> int:
     try:
         if args.cmd == "check":
             c = CheckClient(int(cfg["guild_id"]))
+            c.run(token, log_handler=None)
+            return c.code
+        if args.cmd in ("inspect", "protect"):
+            c = (InspectClient if args.cmd == "inspect" else ProtectClient)(int(cfg["guild_id"]))
             c.run(token, log_handler=None)
             return c.code
         if args.cmd == "wipe":
@@ -1668,25 +1749,49 @@ setup_discord_bot() {
   if ! [[ "$gid" =~ ^[0-9]{17,20}$ ]]; then
     err "That doesn't look like a Discord server ID."; pause; return
   fi
+  MAS_GUILD="$gid" "$PY" "$BOT" set-guild || { pause; return; }
+
+  # LOOK FIRST: never wipe a server that already holds backups
+  echo
+  echo "  Checking the server for existing backup data..."
+  "$PY" "$BOT" inspect; rc=$?
+  case $rc in
+    0) ;;   # empty server: safe to set up
+    3) echo; err "The bot isn't in that server yet. Add it with the invite link above, then try again."
+       pause; return ;;
+    4) echo
+       ok "Existing backup data found - NOTHING was deleted and nobody was removed."
+       "$PY" "$BOT" protect
+       echo
+       start_bot
+       echo
+       echo "  In Discord (#talk-cmds-here):"
+       echo "    /importbackup vps:<n>   restore that VPS from the backup"
+       echo "    /focusbackup vps:<n>    delete the old backup and start fresh (only if you want that)"
+       pause; return ;;
+    *) echo; err "Could not inspect the server (see error above). Nothing was changed."
+       pause; return ;;
+  esac
 
   echo
   echo "  ${RED}${BOLD}⚠ WARNING${RST}"
-  echo "  This server will be ${BOLD}WIPED${RST}:"
+  echo "  This server is empty of backups and will be ${BOLD}WIPED${RST}:"
   echo "    • every member except you (the owner) and the bot is removed"
   echo "    • every channel and category is deleted"
   echo "    • the server is made private (invites removed, anyone who joins is kicked)"
-  echo "  The server may become useless for anything else. Only use a server"
-  echo "  that exists ${BOLD}only for backups${RST}."
+  echo "  Only use a server that exists ${BOLD}only for backups${RST}."
   echo
   read -rp "  Type the server ID again to confirm: " again
   if [[ "$again" != "$gid" ]]; then
     warn "IDs did not match. Cancelled, nothing was changed."; pause; return
   fi
 
-  MAS_GUILD="$gid" "$PY" "$BOT" set-guild || { pause; return; }
-  if "$PY" "$BOT" wipe; then
+  "$PY" "$BOT" wipe; rc=$?
+  if [[ $rc -eq 0 ]]; then
     echo
     start_bot      # keeps the server private: anyone who joins gets kicked
+  elif [[ $rc -eq 4 ]]; then
+    warn "Backup data appeared in the server - wipe refused, nothing was deleted."
   fi
   pause
 }
