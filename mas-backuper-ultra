@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.1.2"
-MAS_UPDATED="2026-11-01 06:06 UTC"
+MAS_VERSION="6.2.0"
+MAS_UPDATED="2026-11-01 12:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
 
@@ -60,7 +60,7 @@ CLI (used by the menu):
   check          exit 0 if the bot is in the configured server, 3 if not
   inspect        read-only: 0 = empty server, 4 = backup data found, 3 = bot not in server
   protect        make a server that has backups private without deleting anything
-  run            start the bot (/setup /vps add /vps list /nodes /backup /importbackup /focusbackup)
+  run            start the bot (/setup /vps add /vps list /nodes /info-vps /backup /importbackup /focusbackup)
 """
 from __future__ import annotations
 
@@ -87,8 +87,8 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.1.2"
-UPDATED = "2026-11-01 06:06 UTC"
+VERSION = "6.2.0"
+UPDATED = "2026-11-01 12:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -1294,6 +1294,511 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
     await backup_job(interaction.client, chan, guild, nums)
 
 
+# ------------------------------------------------------------------ /info-vps
+# One small POSIX shell script is run on the VPS (over SSH, or locally for the bot's own machine).
+# It prints KEY=VALUE lines; everything is parsed in Python below.
+INFO_SCRIPT = r'''
+export LC_ALL=C
+echo "HOST=$(hostname 2>/dev/null)"
+[ -r /etc/os-release ] && . /etc/os-release 2>/dev/null
+echo "OS=${PRETTY_NAME:-$(uname -s 2>/dev/null)}"
+echo "KERNEL=$(uname -r 2>/dev/null)"
+echo "ARCH=$(uname -m 2>/dev/null)"
+echo "UPTIME=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
+echo "LOAD=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+echo "PROCS=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
+awk '
+/^processor/ {t++}
+/^model name/ && m=="" {sub(/^[^:]*:[ \t]*/,""); m=$0}
+/^Hardware/ && hw=="" {sub(/^[^:]*:[ \t]*/,""); hw=$0}
+/^physical id/ {x=$0; sub(/^[^:]*:[ \t]*/,"",x); pid=x+0; s[pid]=1}
+/^core id/ {x=$0; sub(/^[^:]*:[ \t]*/,"",x); c[pid ":" (x+0)]=1}
+/^cpu MHz/ && mhz=="" {sub(/^[^:]*:[ \t]*/,""); mhz=$0}
+END {
+  nc=0; for (k in c) nc++
+  ns=0; for (k in s) ns++
+  print "CPU_MODEL=" (m!="" ? m : hw)
+  print "CPU_THREADS=" t+0
+  print "CPU_CORES=" nc
+  print "CPU_SOCKETS=" ns
+  print "CPU_MHZ=" mhz
+}' /proc/cpuinfo 2>/dev/null
+L=$(lscpu 2>/dev/null)
+echo "LSCPU_MODEL=$(echo "$L" | sed -n 's/^Model name:[[:space:]]*//p' | head -n1)"
+echo "LSCPU_CPUS=$(echo "$L" | sed -n 's/^CPU(s):[[:space:]]*//p' | head -n1)"
+echo "LSCPU_SOCKETS=$(echo "$L" | sed -n 's/^Socket(s):[[:space:]]*//p' | head -n1)"
+echo "LSCPU_CPS=$(echo "$L" | sed -n 's/^Core(s) per socket:[[:space:]]*//p' | head -n1)"
+echo "LSCPU_TPC=$(echo "$L" | sed -n 's/^Thread(s) per core:[[:space:]]*//p' | head -n1)"
+echo "LSCPU_MHZ=$(echo "$L" | sed -n 's/^CPU max MHz:[[:space:]]*//p' | head -n1)"
+A=$(head -n1 /proc/stat 2>/dev/null); sleep 1; B=$(head -n1 /proc/stat 2>/dev/null)
+echo "STAT_A=$A"
+echo "STAT_B=$B"
+awk '
+/^MemTotal/ {print "MEM_TOTAL_KB=" $2}
+/^MemAvailable/ {print "MEM_AVAIL_KB=" $2}
+/^MemFree/ {print "MEM_FREE_KB=" $2}
+/^SwapTotal/ {print "SWAP_TOTAL_KB=" $2}
+/^SwapFree/ {print "SWAP_FREE_KB=" $2}' /proc/meminfo 2>/dev/null
+echo "CG_MEM=$(cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null | head -n1)"
+echo "CG_MEM_USED=$(cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null | head -n1)"
+echo "CG_MEM_INACT=$(awk '$1=="inactive_file"||$1=="total_inactive_file"{print $2; exit}' /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory/memory.stat 2>/dev/null)"
+echo "CG_CPU=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null)"
+echo "CG_CFS=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us 2>/dev/null | head -n1) $(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us 2>/dev/null | head -n1)"
+df -Pk / 2>/dev/null | awk 'NR==2 {print "DISK_ROOT=" $2 "|" $3 "|" $4 "|" $1}'
+df -Pk 2>/dev/null | awk 'NR>1 && $1 ~ /^\/dev\// && $6 != "/" && $6 !~ /^\/(etc|proc|sys|dev|boot)/ && !seen[$1]++ {print "DISK_EXTRA=" $6 "|" $2 "|" $3}' | head -n 4
+echo "SDV=$(systemd-detect-virt 2>/dev/null | head -n1)"
+[ -f /.dockerenv ] && echo "F_DOCKER=1"
+[ -f /run/.containerenv ] && echo "F_PODMAN=1"
+[ -n "$KUBERNETES_SERVICE_HOST" ] && echo "F_KUBE=1"
+[ -d /proc/vz ] && [ ! -d /proc/bc ] && echo "F_OPENVZ=1"
+grep -qi microsoft /proc/version 2>/dev/null && echo "F_WSL=1"
+grep -qw hypervisor /proc/cpuinfo 2>/dev/null && echo "F_HV=1"
+awk '$5=="/etc/hostname" && $4 ~ /containers/ {f=1} END{exit !f}' /proc/self/mountinfo 2>/dev/null && echo "F_MNT_CONT=1"
+echo "CGRP=$(head -c 400 /proc/1/cgroup 2>/dev/null | tr '\n' ' ')"
+echo "C_ENV=$(tr '\0' '\n' </proc/1/environ 2>/dev/null | sed -n 's/^container=//p' | head -n1)"
+echo "DMI=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+'''
+
+_CONTAINERS = {
+    "docker": ("🐳", "Docker container"),
+    "podman": ("🦭", "Podman container"),
+    "lxc": ("📦", "LXC container"),
+    "lxc-libvirt": ("📦", "LXC container"),
+    "openvz": ("📦", "OpenVZ container"),
+    "systemd-nspawn": ("📦", "systemd-nspawn container"),
+    "rkt": ("📦", "rkt container"),
+    "proot": ("📦", "proot environment"),
+    "pouch": ("📦", "Pouch container"),
+    "wsl": ("🪟", "WSL (Windows Subsystem for Linux)"),
+    "kubernetes": ("☸️", "Kubernetes pod (container)"),
+}
+_VMS = {
+    "kvm": "KVM", "qemu": "QEMU", "vmware": "VMware", "microsoft": "Hyper-V", "oracle": "VirtualBox",
+    "xen": "Xen", "bochs": "Bochs", "uml": "User-mode Linux", "parallels": "Parallels", "bhyve": "bhyve",
+    "zvm": "z/VM", "amazon": "Amazon Nitro", "google": "Google Cloud", "acrn": "ACRN", "powervm": "PowerVM",
+    "apple": "Apple Virtualization", "qnx": "QNX",
+}
+
+
+def parse_kv(raw: str) -> dict:
+    kv: dict = {}
+    extra: list[str] = []
+    for ln in raw.splitlines():
+        if "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        if k == "DISK_EXTRA":
+            extra.append(v.strip())
+        else:
+            kv.setdefault(k.strip(), v.strip())
+    kv["_extra_disks"] = extra
+    return kv
+
+
+def _num(x, default=0):
+    try:
+        return int(float(str(x).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def detect_virt(kv: dict) -> tuple[str, str, bool, str]:
+    """-> (icon, label, is_container, detail)"""
+    sdv = kv.get("SDV", "").lower()
+    cenv = kv.get("C_ENV", "").lower()
+    cg = kv.get("CGRP", "").lower()
+    cont = None
+    if sdv in _CONTAINERS:
+        cont = sdv
+    elif kv.get("F_DOCKER"):
+        cont = "docker"
+    elif kv.get("F_PODMAN"):
+        cont = "podman"
+    elif kv.get("F_KUBE") or "kubepods" in cg:
+        cont = "kubernetes"
+    elif kv.get("F_OPENVZ"):
+        cont = "openvz"
+    elif kv.get("F_WSL"):
+        cont = "wsl"
+    elif cenv in _CONTAINERS:
+        cont = cenv
+    elif "docker" in cg or "containerd" in cg:
+        cont = "docker"
+    elif "libpod" in cg:
+        cont = "podman"
+    elif "lxc" in cg:
+        cont = "lxc"
+    elif kv.get("F_MNT_CONT"):
+        cont = "docker"
+    dmi = " ".join(kv.get("DMI", "").split())
+    if cont:
+        icon, label = _CONTAINERS[cont]
+        return icon, label, True, (f"Host machine: {dmi}" if dmi else "")
+    if sdv in _VMS:
+        return "🖥️", f"{_VMS[sdv]} virtual machine", False, (f"Hardware id: {dmi}" if dmi else "")
+    if kv.get("F_HV"):
+        return "🖥️", "Virtual machine", False, (f"Hardware id: {dmi}" if dmi else "")
+    return "🏗️", "Dedicated / bare metal", False, "No virtualization detected"
+
+
+def _cpu_pct(a: str, b: str):
+    try:
+        x = [int(i) for i in a.split()[1:9]]
+        y = [int(i) for i in b.split()[1:9]]
+        if len(x) < 5 or len(y) < 5:
+            return None
+        idle = (y[3] + y[4]) - (x[3] + x[4])
+        total = sum(y) - sum(x)
+        return max(0.0, min(100.0, 100.0 * (total - idle) / total)) if total > 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _cpu_limit(kv: dict):
+    for key in ("CG_CPU", "CG_CFS"):
+        p = kv.get(key, "").split()
+        if len(p) == 2 and p[0].isdigit() and p[1].isdigit() and int(p[0]) > 0 and int(p[1]) > 0:
+            return int(p[0]) / int(p[1])
+    return None
+
+
+def parse_info(raw: str) -> dict:
+    kv = parse_kv(raw)
+    info: dict = {"ok": bool(kv.get("HOST") or kv.get("MEM_TOTAL_KB") or kv.get("CPU_THREADS"))}
+    info["host"], info["os"] = kv.get("HOST", ""), kv.get("OS", "")
+    info["kernel"], info["arch"], info["load"] = kv.get("KERNEL", ""), kv.get("ARCH", ""), kv.get("LOAD", "")
+    info["uptime"] = _num(kv.get("UPTIME"))
+    info["procs"] = _num(kv.get("PROCS"))
+    # ---- cpu
+    info["cpu_model"] = " ".join((kv.get("LSCPU_MODEL") or kv.get("CPU_MODEL") or "Unknown CPU").split())
+    threads = _num(kv.get("LSCPU_CPUS")) or _num(kv.get("CPU_THREADS"))
+    sockets = _num(kv.get("LSCPU_SOCKETS")) or _num(kv.get("CPU_SOCKETS")) or 1
+    cps, tpc = _num(kv.get("LSCPU_CPS")), _num(kv.get("LSCPU_TPC"))
+    cores = sockets * cps if cps else _num(kv.get("CPU_CORES"))
+    if not cores:
+        cores = (threads // tpc) if (threads and tpc) else threads
+    info.update(threads=threads, cores=cores, sockets=sockets)
+    try:
+        info["mhz"] = float(kv.get("LSCPU_MHZ") or kv.get("CPU_MHZ") or 0)
+    except ValueError:
+        info["mhz"] = 0.0
+    info["cpu_pct"] = _cpu_pct(kv.get("STAT_A", ""), kv.get("STAT_B", ""))
+    info["cpu_limit"] = _cpu_limit(kv)
+    # ---- memory
+    total = _num(kv.get("MEM_TOTAL_KB")) * 1024
+    avail = _num(kv.get("MEM_AVAIL_KB")) * 1024 or _num(kv.get("MEM_FREE_KB")) * 1024
+    used = max(0, total - avail)
+    limited = False
+    cg = _num(kv.get("CG_MEM"))
+    if total and 0 < cg < total:
+        total, limited = cg, True
+        used = max(0, _num(kv.get("CG_MEM_USED")) - _num(kv.get("CG_MEM_INACT")))
+    info.update(mem_total=total, mem_used=used, mem_limited=limited)
+    st = _num(kv.get("SWAP_TOTAL_KB")) * 1024
+    info.update(swap_total=st, swap_used=max(0, st - _num(kv.get("SWAP_FREE_KB")) * 1024))
+    # ---- disks
+    r = kv.get("DISK_ROOT", "").split("|")
+    info["disk_total"] = _num(r[0]) * 1024 if len(r) >= 3 else 0
+    info["disk_used"] = _num(r[1]) * 1024 if len(r) >= 3 else 0
+    info["disk_dev"] = r[3] if len(r) >= 4 else ""
+    extra = []
+    for e in kv["_extra_disks"]:
+        p = e.split("|")
+        if len(p) == 3:
+            extra.append((p[0], _num(p[1]) * 1024, _num(p[2]) * 1024))
+    info["disks"] = extra
+    info["virt"] = detect_virt(kv)
+    return info
+
+
+async def fetch_live(v: dict) -> dict:
+    """Connect to the VPS and read its hardware/OS details. -> {state, ms, raw, error}
+    state: 'online' | 'auth' (reachable, login refused) | 'offline'"""
+    if v.get("local"):
+        out = {"state": "online", "ms": 0, "raw": "", "error": ""}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sh", "-s", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            data, _ = await asyncio.wait_for(proc.communicate(INFO_SCRIPT.encode()), 30)
+            out["raw"] = data.decode(errors="replace")
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"could not read system info: {e}"
+        return out
+    t0 = time.monotonic()
+    try:
+        conn = await asyncio.wait_for(ssh_connect(v), 15)
+    except asyncio.TimeoutError:
+        return {"state": "offline", "ms": 0, "raw": "", "error": "connection timed out (15s)"}
+    except asyncssh.PermissionDenied:
+        return {"state": "auth", "ms": int((time.monotonic() - t0) * 1000), "raw": "",
+                "error": "the server answered but refused the login (user/password changed?)"}
+    except Exception as e:  # noqa: BLE001
+        return {"state": "offline", "ms": 0, "raw": "", "error": (str(e) or type(e).__name__)[:200]}
+    ms = int((time.monotonic() - t0) * 1000)
+    out = {"state": "online", "ms": ms, "raw": "", "error": ""}
+    try:
+        res = await asyncio.wait_for(conn.run("sh -s", input=INFO_SCRIPT, check=False), 40)
+        out["raw"] = res.stdout if isinstance(res.stdout, str) else (res.stdout or b"").decode(errors="replace")
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"could not read system info: {(str(e) or type(e).__name__)[:150]}"
+    finally:
+        conn.close()
+        await conn.wait_closed()
+    return out
+
+
+def backup_totals(guild: discord.Guild, n: int) -> dict:
+    """What is stored for this VPS, from the bot's own index (state file) + the Discord categories."""
+    st = load_state(n)
+    size = 0
+    for k in st.values():
+        try:
+            size += int(str(k).split("|", 1)[0])
+        except ValueError:
+            pass
+    cats = vps_categories(guild, n)
+    chans = sum(1 for c in cats for ch in c.channels if ch.name != RECORDS)
+    return {"state": st, "files": len(st), "bytes": size, "channels": chans, "categories": len(cats)}
+
+
+async def coverage_scan(v: dict, state: dict, progress=None, budget: float = 600.0) -> dict:
+    """Walk the VPS (read-only, same excludes as the backup) and compare every file with what was backed up."""
+    excl = load_cfg().get("exclude", DEFAULT_EXCLUDE)
+    r = {"total": 0, "bytes": 0, "saved": 0, "saved_bytes": 0, "changed": 0, "changed_bytes": 0,
+         "new": 0, "new_bytes": 0, "gone": 0, "partial": False, "sample": []}
+    t0 = last = time.monotonic()
+    async with open_fs(v) as sftp:
+        async for path, attrs in walk(sftp, "/", excl):
+            size = attrs.size or 0
+            r["total"] += 1
+            r["bytes"] += size
+            old = state.get(path)
+            if old == f"{size}|{attrs.mtime}":
+                r["saved"] += 1
+                r["saved_bytes"] += size
+            else:
+                kind = "new" if old is None else "changed"
+                r[kind] += 1
+                r[kind + "_bytes"] += size
+                if len(r["sample"]) < 6:
+                    r["sample"].append(("🆕" if old is None else "✏️", path))
+            now = time.monotonic()
+            if progress and now - last > 3:
+                last = now
+                await progress(r["total"])
+            if now - t0 > budget:
+                r["partial"] = True
+                break
+    if not r["partial"]:
+        r["gone"] = max(0, len(state) - r["saved"] - r["changed"])
+    return r
+
+
+def fmt_dur(sec: float) -> str:
+    sec = int(sec)
+    d, r = divmod(sec, 86400)
+    h, r = divmod(r, 3600)
+    m = r // 60
+    return f"{d}d {h}h {m}m" if d else (f"{h}h {m}m" if h else f"{m}m")
+
+
+def bar(pct: float, n: int = 12) -> str:
+    pct = max(0.0, min(100.0, pct))
+    f = round(pct / 100 * n)
+    return "▰" * f + "▱" * (n - f)
+
+
+def dot(pct: float) -> str:
+    return "🟢" if pct < 70 else ("🟡" if pct < 90 else "🔴")
+
+
+def usage_line(used: float, total: float) -> str:
+    if total <= 0:
+        return "unknown"
+    pct = used * 100 / total
+    return f"{dot(pct)} `{bar(pct)}` **{pct:.0f}%**\n{fmt_bytes(used)} / {fmt_bytes(total)} used • {fmt_bytes(max(0, total - used))} free"
+
+
+def build_info_embed(n: int, v: dict, live: dict, info: dict | None, bk: dict, scan: dict | None,
+                     scanning: int | None, running: bool) -> discord.Embed:
+    state = live.get("state", "offline")
+    where = "this machine (local)" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}:{v.get('port', 22)}"
+    if state == "online":
+        color, head = 0x00E5FF, "🟢 **ONLINE** • connected"
+        head += " (local machine)" if v.get("local") else f" in **{live.get('ms', 0)} ms**"
+    elif state == "auth":
+        color, head = 0xF1C40F, f"🟠 **REACHABLE, LOGIN REFUSED** • {live.get('ms', 0)} ms"
+    else:
+        color, head = 0xE74C3C, "🔴 **OFFLINE** • not connected"
+    name = (info or {}).get("host") or f"vps-{n}"
+    e = discord.Embed(title=f"🖥️  VPS-{n}  •  {name}", color=discord.Color(color), timestamp=discord.utils.utcnow())
+    desc = f"{head}\n📡 `{where}`"
+    if live.get("error"):
+        desc += f"\n⚠️ {live['error']}"
+    e.description = desc
+
+    if info and info.get("ok"):
+        icon, label, is_cont, detail = info["virt"]
+        e.add_field(name="🧩 Type", value=f"{icon} **{label}**" + (f"\n{detail}" if detail else ""), inline=True)
+        e.add_field(name="🐧 System",
+                    value=f"{info['os'] or 'Linux'}\nKernel `{info['kernel']}` • `{info['arch']}`\n"
+                          f"⏱️ Up {fmt_dur(info['uptime'])} • {info['procs']} processes", inline=True)
+        e.add_field(name="\u200b", value="\u200b", inline=True)
+        cpu = (f"**{info['cpu_model']}**\n🔹 **{info['cores']}** core{'s' if info['cores'] != 1 else ''} • "
+               f"**{info['threads']}** thread{'s' if info['threads'] != 1 else ''}")
+        if info["sockets"] > 1:
+            cpu += f" • {info['sockets']} sockets"
+        if info["mhz"]:
+            cpu += f" • {info['mhz'] / 1000:.2f} GHz"
+        if info["cpu_limit"]:
+            cpu += f"\n🔒 container limit: **{info['cpu_limit']:.2f}** cores"
+        if info["cpu_pct"] is not None:
+            cpu += f"\n{dot(info['cpu_pct'])} `{bar(info['cpu_pct'], 16)}` **{info['cpu_pct']:.0f}%** usage"
+        if info["load"]:
+            cpu += f" • load {info['load']}"
+        e.add_field(name="⚙️ CPU", value=cpu[:1024], inline=False)
+        ram_title = "🧠 RAM" + (" (container limit)" if info["mem_limited"] else "")
+        e.add_field(name=ram_title, value=usage_line(info["mem_used"], info["mem_total"]), inline=True)
+        disk = usage_line(info["disk_used"], info["disk_total"])
+        e.add_field(name="💾 Disk (/)", value=disk, inline=True)
+        if info["swap_total"]:
+            e.add_field(name="🔁 Swap", value=usage_line(info["swap_used"], info["swap_total"]), inline=True)
+        else:
+            e.add_field(name="🔁 Swap", value="none", inline=True)
+        if info["disks"]:
+            lines = [f"`{m[:28]}` {fmt_bytes(u)} / {fmt_bytes(t)} ({(u * 100 / t if t else 0):.0f}%)"
+                     for m, t, u in info["disks"]]
+            e.add_field(name="🗄️ Other disks", value="\n".join(lines)[:1024], inline=False)
+    elif state == "online":
+        e.add_field(name="⚙️ System info", value="Connected, but the system details could not be read.", inline=False)
+
+    # ---- backup storage
+    last = v.get("last_backup")
+    stor = (f"**{fmt_bytes(bk['bytes'])}** in **{bk['files']:,}** files\n"
+            f"📂 {bk['channels']} channel(s) in {bk['categories']} categor{'y' if bk['categories'] == 1 else 'ies'}\n"
+            f"🕒 Last backup: {f'<t:{int(last)}:R>' if last else '**never**'}")
+    if running:
+        stor += "\n⏳ a backup/restore is running right now"
+    e.add_field(name="📦 Backup size", value=stor, inline=True)
+
+    # ---- coverage
+    if scan is not None:
+        total = scan["total"]
+        pct = 100.0 if total == 0 else scan["saved"] * 100 / total
+        complete = scan["changed"] == 0 and scan["new"] == 0 and not scan["partial"]
+        title = "🛡️ Backup coverage — " + ("✅ every file is backed up" if complete else
+                                          ("⏳ partial scan" if scan["partial"] and scan["changed"] == scan["new"] == 0
+                                           else "⚠️ not fully backed up"))
+        txt = (f"`{bar(pct)}` **{pct:.1f}%**\n"
+               f"📁 Files on VPS: **{total:,}** ({fmt_bytes(scan['bytes'])})\n"
+               f"✅ Up to date: **{scan['saved']:,}**\n"
+               f"✏️ Changed since backup: **{scan['changed']:,}**\n"
+               f"🆕 Never backed up: **{scan['new']:,}** ({fmt_bytes(scan['new_bytes'])})")
+        if not scan["partial"]:
+            txt += f"\n🗑️ Deleted since backup: **{scan['gone']:,}** (copy kept)"
+        else:
+            txt += "\n⚠️ scan stopped early (10 min limit) - numbers are partial"
+        e.add_field(name=title[:256], value=txt[:1024], inline=False)
+        if scan["sample"]:
+            lines = "\n".join(f"{ic} {p[-70:]}" for ic, p in scan["sample"])
+            more = scan["changed"] + scan["new"] - len(scan["sample"])
+            if more > 0:
+                lines += f"\n… and {more:,} more"
+            e.add_field(name="📝 Files that need a backup (sample)", value=f"```\n{lines[:950]}\n```", inline=False)
+    elif scanning is not None:
+        e.add_field(name="🛡️ Backup coverage", value=f"⏳ Scanning files on the VPS… **{scanning:,}** checked so far", inline=False)
+    else:
+        e.add_field(name="🛡️ Backup coverage",
+                    value="Can't compare files while the VPS is not connected. The numbers above come from the last backup.",
+                    inline=False)
+    e.set_footer(text="MAS GUI v6.2 • /info-vps")
+    return e
+
+
+class InfoView(discord.ui.View):
+    def __init__(self, owner_id: int, n: int):
+        super().__init__(timeout=600)
+        self.owner_id, self.n = owner_id, n
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.primary)
+    async def refresh(self, i: discord.Interaction, b: discord.ui.Button):
+        loading = discord.Embed(description=f"🔄 Refreshing **vps-{self.n}**…", color=discord.Color(0x00E5FF))
+        await i.response.edit_message(embed=loading, view=None)
+        await run_info(i, self.n)
+
+
+async def _safe_edit(inter: discord.Interaction, **kw) -> None:
+    try:
+        await inter.edit_original_response(**kw)
+    except discord.HTTPException as e:
+        log.warning("info-vps: could not update the message: %s", e)
+
+
+async def run_info(inter: discord.Interaction, n: int) -> None:
+    guild = inter.guild
+    try:
+        v = load_vps(n)
+    except Exception as e:  # noqa: BLE001
+        await _safe_edit(inter, content=f"Could not read vps-{n}: `{e}`", embed=None, view=None)
+        return
+    running = inter.client.lock.locked()
+    await _safe_edit(inter, content=None, embed=discord.Embed(
+        description=f"🔎 Connecting to **vps-{n}**…", color=discord.Color(0x00E5FF)), view=None)
+    live = await fetch_live(v)
+    info = parse_info(live["raw"]) if live.get("raw") else None
+    bk = backup_totals(guild, n)
+    if live["state"] != "online":
+        await _safe_edit(inter, embed=build_info_embed(n, v, live, info, bk, None, None, running),
+                         view=InfoView(inter.user.id, n))
+        return
+    await _safe_edit(inter, embed=build_info_embed(n, v, live, info, bk, None, 0, running))
+
+    async def progress(count: int) -> None:
+        await _safe_edit(inter, embed=build_info_embed(n, v, live, info, bk, None, count, running))
+
+    try:
+        scan = await coverage_scan(v, bk["state"], progress)
+    except Exception as e:  # noqa: BLE001
+        log.exception("info-vps scan failed: %s", e)
+        live["error"] = f"file scan failed: {str(e)[:150]}"
+        scan = None
+    await _safe_edit(inter, embed=build_info_embed(n, v, live, info, bk, scan, None, running),
+                     view=InfoView(inter.user.id, n))
+
+
+@app_commands.command(name="info-vps", description="Full details of a VPS: online status, CPU, RAM, disk, type and backup coverage")
+@app_commands.describe(number="VPS number (see /nodes)")
+async def cmd_info(interaction: discord.Interaction, number: int):
+    if not await guard(interaction):
+        return
+    if not vps_file(number).exists():
+        await interaction.response.send_message(f"vps-{number} isn't added. Use `/nodes` to see your VPS list.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await run_info(interaction, number)
+
+
+@cmd_info.autocomplete("number")
+async def cmd_info_autocomplete(interaction: discord.Interaction, current: str):
+    if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+        return []
+    out = []
+    for n in vps_numbers():
+        if current and current not in str(n):
+            continue
+        try:
+            v = load_vps(n)
+        except Exception:  # noqa: BLE001
+            continue
+        where = "this machine" if v.get("local") else f"{v.get('user', '?')}@{v.get('host', '?')}"
+        out.append(app_commands.Choice(name=f"vps-{n} • {where}"[:100], value=n))
+    return out[:25]
+
+
 # ------------------------------------------------------------------ bot
 class Bot(discord.Client):
     def __init__(self, cfg: dict):
@@ -1307,7 +1812,7 @@ class Bot(discord.Client):
 
     async def setup_hook(self):
         g = discord.Object(id=self.gid)
-        for c in (cmd_setup, vps_group, cmd_nodes, cmd_backup, cmd_import, cmd_focus):
+        for c in (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_backup, cmd_import, cmd_focus):
             self.tree.add_command(c, guild=g)
         await self.tree.sync(guild=g)
         if float(self.cfg.get("interval_hours", 0)) > 0:
@@ -1776,6 +2281,7 @@ setup_discord_bot() {
        start_bot
        echo
        echo "  In Discord (#talk-cmds-here):"
+       echo "    /info-vps number:<n>    full VPS details (status, CPU, RAM, disk, backup coverage)"
        echo "    /importbackup vps:<n>   restore that VPS from the backup"
        echo "    /focusbackup vps:<n>    delete the old backup and start fresh (only if you want that)"
        pause; return ;;
