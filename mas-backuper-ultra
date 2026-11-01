@@ -107,6 +107,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import fnmatch
 import hashlib
 import io
 import itertools
@@ -367,6 +368,36 @@ def excluded(path: str, excl: list[str]) -> bool:
             return True
     # never back up the bot's own data (token!) if the VPS is the bot host
     return any(p in (".mas-backup", "mas-backup") for p in path.split("/"))
+
+
+# Files that hold an IP / port / keys / tunnel or session needed to reach the VPS.
+# /importbackup and /copybackup never restore these, so a restore can't cut your access.
+#   plain path  -> that file/folder and everything under it
+#   has * or ?  -> glob; without a "/" it is matched against every folder/file name in the path
+IMPORT_SKIP = [
+    "*sshx*",                                   # sshx binary, sessions, logs (/usr/local/bin/sshx, ~/.sshx, /tmp/mas-sshx*)
+    "/etc/ssh", "/root/.ssh", "/home/*/.ssh",   # sshd config (port), host keys, authorized_keys, known_hosts
+    "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/etc/network", "/etc/netplan",
+    "/etc/NetworkManager/system-connections", "/etc/systemd/network", "/etc/cloud",
+    "/etc/ufw", "/etc/iptables", "/etc/nftables.conf",    # firewall rules (open/closed ports)
+    "/etc/wireguard", "/etc/openvpn", "/var/lib/tailscale",
+]
+
+
+def import_skipped(path: str, rules: list[str]) -> bool:
+    parts = path.split("/")
+    for r in rules:
+        if "*" in r or "?" in r:
+            if "/" in r:
+                if fnmatch.fnmatchcase(path, r) or fnmatch.fnmatchcase(path, r.rstrip("/") + "/*"):
+                    return True
+            elif any(fnmatch.fnmatchcase(x, r) for x in parts if x):
+                return True
+        else:
+            r = r.rstrip("/")
+            if path == r or path.startswith(r + "/"):
+                return True
+    return False
 
 
 async def walk(sftp, root: str, excl: list[str]):
@@ -962,7 +993,7 @@ def restore_embed(vps_n: int, v: dict, prog: dict, nbytes: int, elapsed: float, 
     e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
     e.add_field(name="🖥️ Target", value=where, inline=True)
     if skipped:
-        e.add_field(name="🛡️ Skipped (protected)", value=f"{skipped:,} system files were left untouched", inline=False)
+        e.add_field(name="🛡️ Skipped (protected)", value=f"{skipped:,} connection/system files (sshx, SSH, IP/port & network configs) were left untouched", inline=False)
     e.set_footer(text=f"{FOOTER} • {'Copy' if src is not None else 'Import'}")
     return e
 
@@ -1098,11 +1129,14 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n:
         for rec in await parse_records(msg):
             if int(rec.get("vps", vps_n)) == vps_n:
                 records[rec["path"]] = rec            # newest record for a path wins
-    skipped = 0
+    # never restore sshx / ssh / ip-port / network files: they would break the way you connect to the VPS
+    rules = load_cfg().get("import_skip", IMPORT_SKIP)
+    keep = {p: r for p, r in records.items() if not import_skipped(p, rules)}
+    skipped, records = len(records) - len(keep), keep
     if target_n is not None:                         # copy to another VPS: keep that VPS reachable and itself
         skip = load_cfg().get("copy_skip", COPY_SKIP)
         keep = {p: r for p, r in records.items() if not excluded(p, skip)}
-        skipped, records = len(records) - len(keep), keep
+        skipped, records = skipped + len(records) - len(keep), keep
     log.info("import vps%d -> vps%d: %d files in index (%d skipped)", vps_n, tn, len(records), skipped)
     singles = [r for r in records.values() if not r.get("member")]
     bundles: dict[tuple, list] = defaultdict(list)
@@ -1398,7 +1432,10 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
     await reply(interaction, ui(
         "warn", f"Restore vps-{vps}?",
         f"This reads `{RECORDS}` and **overwrites** matching files on vps-{vps} with the backed-up versions, "
-        f"at their old paths.", [("🔔 When it's done", "I will ping you here and DM you.")]), view=view)
+        f"at their old paths.",
+        [("🛡️ Ignored on purpose", "sshx files, SSH keys/config, IP/port & network configs, firewall and VPN files\n"
+                                   "(so a restore can never cut your connection to the VPS)"),
+         ("🔔 When it's done", "I will ping you here and DM you.")]), view=view)
     await view.wait()
     if not view.ok:
         return
@@ -2379,7 +2416,7 @@ async def cmd_copy(interaction: discord.Interaction, vps: int, to: int):
         f"Files with the same path on vps-{to} are **overwritten**.",
         [("📦 From (backup of)", f"vps-{vps}\n`{where_of(src_v)}`", True),
          ("🎯 Into", f"vps-{to}\n`{where_of(dst_v)}`", True),
-         ("🛡️ Skipped on purpose", "`" + "`, `".join(skip[:14]) + "`\n(so you don't lose SSH access or the VPS identity)"),
+         ("🛡️ Skipped on purpose", "`" + "`, `".join((skip + IMPORT_SKIP)[:20]) + "`\n(so you don't lose SSH access or the VPS identity)"),
          ("🔔 When it's done", "I will ping you here and DM you.")]), view=view)
     await view.wait()
     if not view.ok:
