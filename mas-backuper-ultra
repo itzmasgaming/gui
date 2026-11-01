@@ -2743,6 +2743,7 @@ VPS_CAT = "VPS"                      # category in the main server: one live-sta
 LOGO_URL = "https://raw.githubusercontent.com/itzmasgaming/gui/main/dc-database-logo.png"
 BRAND_SUB = "Sub to ItzMASGaming"
 CONFIRM_ID = 1352328694965735635     # may always run /confirm
+PRESENCE_SECONDS = 4                 # bot status rotation (Discord allows ~5 status changes per 20 s, so 4 is the fastest safe value)
 MAX_CHANGES = 10                     # MORE than this many changes by one person pauses all backups
 ID_FILE = DATA_DIR / "identity.json"
 
@@ -3152,6 +3153,7 @@ class Bot(discord.Client):
         if not self._started:                       # on_ready can fire again after a reconnect
             self._started = True
             asyncio.create_task(self.ident.watch())
+            asyncio.create_task(self.presence_loop())
             asyncio.create_task(self.status_loop())
             if guild is not None:
                 asyncio.create_task(self.ident.cycle())
@@ -3173,6 +3175,20 @@ class Bot(discord.Client):
                 asyncio.create_task(self.ident.apply_main())
         except Exception as e:  # noqa: BLE001
             log.exception("on_guild_join failed: %s", e)
+
+    async def presence_loop(self):
+        """Bot status rotates: MAS Backup System -> Running <n>Vps -> ItzMASGaming -> (again)."""
+        await self.wait_until_ready()
+        i = 0
+        while not self.is_closed():
+            try:
+                texts = ["MAS Backup System", f"Running {len(vps_numbers())}Vps", "ItzMASGaming"]
+                await self.change_presence(activity=discord.Game(name=texts[i % len(texts)]),
+                                           status=discord.Status.online)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not change the bot status: %s", e)
+            i += 1
+            await asyncio.sleep(PRESENCE_SECONDS)
 
     async def status_loop(self):
         await self.wait_until_ready()
