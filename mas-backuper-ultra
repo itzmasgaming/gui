@@ -126,6 +126,14 @@ SYSTEM_CAT = "mas-system"
 RECORDS = "read-paths-mas"      # per-VPS index channel (inside the vps-N category)
 TALK = "talk-cmds-here"         # commands + chat, NOT in a category, never touched by backups/focus
 MAX_PER_CATEGORY = 50
+MAX_SERVERS = 500               # servers one bot can use (database servers + the main server)
+CHANNEL_LIMIT = 500             # Discord: channels + categories per server
+CHANNEL_RESERVE = 6             # keep a few free so the index channel etc. always fits
+SERVERS_CH = "servers-setuped"  # main server: private list of every database server
+PTR_TAG = "➡️ Other data"       # last line of a path channel when the rest of the data is in another server
+SERVER_ID_RE = re.compile(r"Server ID: `(\d{15,25})`")
+PTR_RE = re.compile(r"\(`(\d{15,25})`\)")
+BOT = None                      # the running Bot (set in Bot.__init__)
 NO_MENTIONS = discord.AllowedMentions.none()
 
 DEFAULT_EXCLUDE = [
@@ -602,6 +610,43 @@ def backups_exist(guild: discord.Guild) -> bool:
     return bool(backup_findings(guild))
 
 
+class NeedMoreServers(Exception):
+    """Every database server is full (Discord allows 500 channels per server)."""
+
+
+def db_guild_ids() -> list[int]:
+    """Primary database server first, then every extra one added with /addserver."""
+    cfg = load_cfg()
+    out = [int(cfg.get("guild_id", 0))]
+    for x in cfg.get("extra_guild_ids", []):
+        if int(x) not in out:
+            out.append(int(x))
+    return out
+
+
+def extra_ids() -> list[int]:
+    return db_guild_ids()[1:]
+
+
+def db_guilds() -> list[discord.Guild]:
+    if BOT is None:
+        return []
+    return [g for g in (BOT.get_guild(i) for i in db_guild_ids()) if g is not None]
+
+
+def guild_room(g: discord.Guild, n: int) -> bool:
+    """True if n more channels/categories still fit in this server."""
+    return len(g.channels) + n <= CHANNEL_LIMIT - CHANNEL_RESERVE
+
+
+def get_db_channel(ch_id: int):
+    for g in db_guilds():
+        ch = g.get_channel(ch_id)
+        if ch is not None:
+            return ch
+    return None
+
+
 def vps_categories(guild: discord.Guild, vps: int) -> list[discord.CategoryChannel]:
     pat = re.compile(rf"vps-{vps}(-\d+)?")
     cats = [c for c in guild.categories if pat.fullmatch(c.name)]
@@ -610,7 +655,8 @@ def vps_categories(guild: discord.Guild, vps: int) -> list[discord.CategoryChann
 
 def vps_has_data(guild: discord.Guild, vps: int) -> bool:
     """True if vps-N holds backed-up files (a category with only the empty index channel doesn't count)."""
-    return any(ch.name != RECORDS for cat in vps_categories(guild, vps) for ch in cat.channels)
+    return any(ch.name != RECORDS for g in (db_guilds() or [guild])
+               for cat in vps_categories(g, vps) for ch in cat.channels)
 
 
 async def delete_many(items, reason: str, batch: int = 5) -> None:
@@ -687,6 +733,25 @@ async def records_channel(guild: discord.Guild, vps: int) -> discord.TextChannel
     return ch or await guild.create_text_channel(RECORDS, category=cat, topic=f"path index for vps-{vps}")
 
 
+async def records_channel_any(vps: int) -> discord.TextChannel:
+    """The path channel of vps-N in whichever database server already has it, else in the first one with room."""
+    gs = db_guilds()
+    for g in gs:
+        for cat in vps_categories(g, vps):
+            ch = discord.utils.get(cat.text_channels, name=RECORDS)
+            if ch is not None:
+                return ch
+    for g in gs:
+        if guild_room(g, 2):
+            return await records_channel(g, vps)
+    raise NeedMoreServers("every database server is full")
+
+
+async def delete_vps_data_everywhere(n: int) -> None:
+    for g in db_guilds():
+        await delete_vps_data(g, n)
+
+
 async def delete_vps_data(guild: discord.Guild, n: int) -> None:
     """Delete all data of vps-N: its channels first, then its category."""
     for cat in vps_categories(guild, n):
@@ -697,22 +762,29 @@ async def delete_vps_data(guild: discord.Guild, n: int) -> None:
             log.error("could not delete category %s: %s", cat.name, e)
 
 
-async def bucket_channel(guild, vps, bucket, cache):
+async def bucket_channel(guilds, vps, bucket, cache):
+    """The channel that stores this folder. Uses the first database server that still has room;
+    raises NeedMoreServers when every one of them is full."""
     key = (vps, bucket)
     if key in cache:
         return cache[key]
-    cats = vps_categories(guild, vps) or [await ensure_category(guild, vps)]
-    for cat in cats:
-        for ch in cat.text_channels:
-            if ch.topic == bucket:
-                cache[key] = ch
-                return ch
-    for cat in cats:
-        if len(cat.channels) < MAX_PER_CATEGORY:
+    for g in guilds:                                   # this folder already has a channel somewhere
+        for cat in vps_categories(g, vps):
+            for ch in cat.text_channels:
+                if ch.topic == bucket:
+                    cache[key] = ch
+                    return ch
+    for g in guilds:                                   # first server with room
+        cats = vps_categories(g, vps)
+        cat = next((c for c in cats if len(c.channels) < MAX_PER_CATEGORY), None)
+        if cat is not None and guild_room(g, 1):
+            break
+        if cat is None and guild_room(g, 2):
+            cat = await ensure_category(g, vps, len(cats) + 1)
             break
     else:
-        cat = await ensure_category(guild, vps, len(cats) + 1)
-    ch = await guild.create_text_channel(chan_name(bucket), category=cat, topic=bucket)
+        raise NeedMoreServers("every database server is full")
+    ch = await g.create_text_channel(chan_name(bucket), category=cat, topic=bucket)
     cache[key] = ch
     return ch
 
@@ -844,7 +916,9 @@ class Backup:
     def __init__(self, guild, v, cfg, rp, state):
         self.guild, self.v, self.cfg, self.rp, self.state = guild, v, cfg, rp, state
         self.sftp = None
-        self.limit = part_limit(guild, cfg)
+        self.guilds = db_guilds() or [guild]
+        self.rps = {rp.guild.id: rp}                  # path channel per database server
+        self.limit = min(part_limit(g, cfg) for g in self.guilds)
         self.small = min(int(float(cfg.get("small_file_mb", 1)) * 1048576), self.limit // 8)
         self.depth = int(cfg.get("bucket_depth", 2))
         self.slots = asyncio.Semaphore(int(cfg.get("upload_concurrency", 6)))   # uploads in flight
@@ -873,9 +947,9 @@ class Backup:
 
     def add_record(self, path, perm, size, mtime, sha, ch, msgs, key, member=None) -> None:
         r = {
-            "link": f"https://discord.com/channels/{self.guild.id}/{ch.id}/{msgs[0]}" if msgs else "",
+            "link": f"https://discord.com/channels/{ch.guild.id}/{ch.id}/{msgs[0]}" if msgs else "",
             "vps": self.v["vps"], "path": path, "size": size, "mode": perm & 0o7777, "mtime": mtime,
-            "sha256": sha, "ch": ch.id, "msgs": msgs,
+            "sha256": sha, "g": ch.guild.id, "ch": ch.id, "msgs": msgs,
         }
         if member:
             r["member"] = member
@@ -893,18 +967,54 @@ class Backup:
             recs, self.records = self.records, []
             self.last_flush = time.monotonic()
             maxb = self.limit - 8192
-            chunk: list[str] = []
-            size = 0
-            lines = [json.dumps(r, separators=(",", ":"), ensure_ascii=False) for r in recs]
-            for ln in lines + [None]:
-                if chunk and (ln is None or size + len(ln.encode()) + 1 > maxb):
-                    name = f"paths{SEP}{int(time.time())}{SEP}{next(self.counter)}.jsonl"
-                    await send_file(self.rp, "\n".join(chunk).encode(), name)
-                    chunk, size = [], 0
-                if ln is not None:
-                    chunk.append(ln)
-                    size += len(ln.encode()) + 1
+            by_g: dict = defaultdict(list)
+            for r in recs:                                # each record goes to the path channel of ITS server
+                by_g[int(r.get("g") or self.guild.id)].append(r)
+            for gid, items in by_g.items():
+                rp = await self.rp_for(gid)
+                chunk: list[str] = []
+                size = 0
+                lines = [json.dumps(r, separators=(",", ":"), ensure_ascii=False) for r in items]
+                for ln in lines + [None]:
+                    if chunk and (ln is None or size + len(ln.encode()) + 1 > maxb):
+                        name = f"paths{SEP}{int(time.time())}{SEP}{next(self.counter)}.jsonl"
+                        await send_file(rp, "\n".join(chunk).encode(), name)
+                        chunk, size = [], 0
+                    if ln is not None:
+                        chunk.append(ln)
+                        size += len(ln.encode()) + 1
             save_state(self.v["vps"], self.state)
+
+    async def rp_for(self, gid: int) -> discord.TextChannel:
+        rp = self.rps.get(gid)
+        if rp is None:
+            g = BOT.get_guild(gid) if BOT else None
+            if g is None:
+                raise RuntimeError(f"database server {gid} is not reachable")
+            rp = await records_channel(g, self.v["vps"])
+            self.rps[gid] = rp
+        return rp
+
+    async def write_pointers(self) -> None:
+        """When vps-N lives in several servers, the LAST line of each path channel says where the rest is."""
+        n = self.v["vps"]
+        chain = []
+        for g in self.guilds:
+            rp = self.rps.get(g.id)
+            if rp is None:
+                cats = vps_categories(g, n)
+                rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
+            if rp is not None:
+                chain.append((g, rp))
+        for (g, rp), (ng, nrp) in zip(chain, chain[1:]):
+            try:
+                async for m in rp.history(limit=100):
+                    if m.author.id == g.me.id and (m.content or "").startswith(PTR_TAG):
+                        await m.delete()
+                await rp.send(f"{PTR_TAG} of **vps-{n}** is in server **{ng.name}** (`{ng.id}`) - continue here: {nrp.jump_url}",
+                              allowed_mentions=NO_MENTIONS)
+            except discord.HTTPException as e:
+                log.warning("could not write the pointer in %s: %s", g.name, e)
 
     # ---- per-file entry point (called one file at a time by the walker)
     async def handle(self, path: str, attrs) -> None:
@@ -913,7 +1023,7 @@ class Backup:
         if self.state.get(path) == key:
             self.stats["skipped"] += 1
             return
-        ch = await bucket_channel(self.guild, self.v["vps"], bucket_of(path, self.depth), self.cache)
+        ch = await bucket_channel(self.guilds, self.v["vps"], bucket_of(path, self.depth), self.cache)
         if size == 0:
             self.add_record(path, attrs.permissions or 0o644, 0, attrs.mtime or 0,
                             hashlib.sha256(b"").hexdigest(), ch, [], key)
@@ -1030,6 +1140,8 @@ class Backup:
                 continue
             break
         await self.flush_records(force=True)
+        if len(self.rps) > 1 or len(self.guilds) > 1:
+            await self.write_pointers()
 
 
 def fmt_bytes(n: float) -> str:
@@ -1051,7 +1163,7 @@ def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) ->
     clean = s["failed"] == 0
     e = discord.Embed(
         title=f"{'✅' if clean else '⚠️'}  VPS-{vps_n} backup {'complete' if clean else 'finished with errors'}",
-        description=(f"Everything from **vps-{vps_n}** is now safely stored in this server."
+        description=(f"Everything from **vps-{vps_n}** is now safely stored in your database server(s)."
                      if clean else
                      f"**vps-{vps_n}** was backed up, but some files failed. Details are in the bot console/log."),
         color=discord.Color(0x00E5FF if clean else 0xF1C40F),
@@ -1140,17 +1252,25 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     excl = cfg.get("exclude", DEFAULT_EXCLUDE)
     _, fresh = await ensure_marker(guild)
     state = {} if fresh else load_state(vps_n)
-    rp = await records_channel(guild, vps_n)
+    try:
+        rp = await records_channel_any(vps_n)
+    except NeedMoreServers:
+        await notify_full(guild, status.channel, vps_n)
+        return
     bk = Backup(guild, v, cfg, rp, state)
     t0 = time.monotonic()
     log.info("backup of vps%d started", vps_n)
     await status.update(f"Starting backup of **vps-{vps_n}**…", force=True)
+    full = False
     try:
         async with open_fs(v) as sftp:
             bk.sftp = sftp
             async for path, attrs in walk(sftp, "/", excl):
                 try:
                     await bk.handle(path, attrs)
+                except NeedMoreServers:
+                    full = True                           # no room anywhere: save what is in flight, then ask for a new server
+                    break
                 except Exception as e:  # noqa: BLE001
                     bk.fail(path, e)
                 s = bk.stats
@@ -1161,6 +1281,12 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
             await bk.finish()
     finally:
         save_state(vps_n, state)
+    if full:
+        log.warning("backup of vps%d stopped: every database server is full", vps_n)
+        await status.update(f"Stopped: every database server is full. {bk.stats['ok']:,} files were saved.",
+                            force=True, state="error")
+        await notify_full(guild, status.channel, vps_n, bk.stats)
+        return
     v["synced"] = True
     v["last_backup"] = int(time.time())
     save_vps(vps_n, v)
@@ -1198,8 +1324,43 @@ async def write_remote(sftp, path: str, data: bytes, mode, mtime) -> None:
         raise
 
 
+async def read_index(vps_n: int) -> dict[str, dict]:
+    """Read the path channels of vps-N in EVERY database server (following 'other data' pointers too)."""
+    found: list[tuple] = []
+    seen: set[int] = set()
+    queue = list(db_guild_ids())
+    got_rp = False
+    while queue:
+        gid = queue.pop(0)
+        if gid in seen:
+            continue
+        seen.add(gid)
+        g = BOT.get_guild(gid) if BOT else None
+        if g is None:
+            continue
+        cats = vps_categories(g, vps_n)
+        rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
+        if rp is None:
+            continue
+        got_rp = True
+        async for msg in rp.history(limit=None, oldest_first=True):
+            for rec in await parse_records(msg):
+                if int(rec.get("vps", vps_n)) == vps_n:
+                    found.append((msg.created_at, rec))
+            if (msg.content or "").startswith(PTR_TAG):
+                mt = PTR_RE.search(msg.content)
+                if mt:
+                    queue.append(int(mt.group(1)))
+    if not got_rp:
+        raise ValueError(f"no `{RECORDS}` channel found for vps-{vps_n}")
+    records: dict[str, dict] = {}
+    for _, rec in sorted(found, key=lambda t: t[0]):
+        records[rec["path"]] = rec                    # newest record for a path wins
+    return records
+
+
 async def restore_big(guild, sftp, rec) -> None:
-    ch = guild.get_channel(int(rec["ch"]))
+    ch = get_db_channel(int(rec["ch"]))
     if ch is None:
         raise ValueError(f"channel {rec['ch']} no longer exists")
     path = rec["path"]
@@ -1229,7 +1390,7 @@ async def restore_big(guild, sftp, rec) -> None:
 
 async def restore_bundle(guild, sftp, ch_id: int, msg_id: int, recs: list[dict]):
     """Download one bundle once and unpack every file that lives in it. Returns (ok_recs, failed)."""
-    ch = guild.get_channel(ch_id)
+    ch = get_db_channel(ch_id)
     if ch is None:
         raise ValueError(f"channel {ch_id} no longer exists")
     m = await ch.fetch_message(msg_id)
@@ -1256,16 +1417,8 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n:
     """Restore the backup of vps_n. With target_n set, paste that backup into ANOTHER vps (/copybackup)."""
     tn = target_n or vps_n
     v = load_vps(tn)
-    cats = vps_categories(guild, vps_n)
-    rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
-    if rp is None:
-        raise ValueError(f"no `{RECORDS}` channel found for vps-{vps_n}")
     await status.update(f"Reading the path index of **vps-{vps_n}**…", force=True)
-    records: dict[str, dict] = {}
-    async for msg in rp.history(limit=None, oldest_first=True):
-        for rec in await parse_records(msg):
-            if int(rec.get("vps", vps_n)) == vps_n:
-                records[rec["path"]] = rec            # newest record for a path wins
+    records = await read_index(vps_n)
     # never restore sshx / ssh / ip-port / network files: they would break the way you connect to the VPS
     rules = load_cfg().get("import_skip", IMPORT_SKIP)
     keep = {p: r for p, r in records.items() if not import_skipped(p, rules)}
@@ -1405,8 +1558,11 @@ async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, logi
         await interaction.followup.send(embed=ui("ok", f"VPS-{n} added", f"{login_text} See the message above."),
                                         ephemeral=True)
     else:
-        await ensure_category(guild, n)
-        await records_channel(guild, n)
+        try:
+            await ensure_category(guild, n)
+            await records_channel(guild, n)
+        except discord.HTTPException as e:             # the server may be full: the backup will use another one
+            log.warning("could not pre-create the vps-%d channels: %s", n, e)
         v["synced"] = True            # nothing old to decide about: first backup can start
         save_vps(n, v)
         await interaction.followup.send(embed=ui(
@@ -1714,8 +1870,8 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
     if not vps_file(vps).exists():
         await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/vps add` first."), ephemeral=True)
         return
-    if not vps_categories(dbg(interaction), vps):
-        await reply(interaction, ui("error", "No backup data", f"There is no backup of vps-{vps} in this server."), ephemeral=True)
+    if not any(vps_categories(g, vps) for g in (db_guilds() or [dbg(interaction)])):
+        await reply(interaction, ui("error", "No backup data", f"There is no backup of vps-{vps} in any database server."), ephemeral=True)
         return
     view = Confirm(interaction.user.id, "Restore (overwrites files)", "Cancel")
     await reply(interaction, ui(
@@ -1760,7 +1916,7 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
     guild, chan = dbg(interaction), interaction.channel
     nums = [vps] if vps else vps_numbers()
     if vps:
-        await delete_vps_data(guild, vps)
+        await delete_vps_data_everywhere(vps)
     else:
         for cat in list(guild.categories):
             m = re.fullmatch(r"vps-(\d+)(-\d+)?", cat.name)
@@ -1769,6 +1925,13 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
             elif cat.name == SYSTEM_CAT:
                 await delete_many(list(cat.channels), "focusbackup")
                 await cat.delete(reason="focusbackup")
+        for g in db_guilds():                         # the extra database servers too
+            if g.id == guild.id:
+                continue
+            for cat in list(g.categories):
+                m = re.fullmatch(r"vps-(\d+)(-\d+)?", cat.name)
+                if m:
+                    await delete_vps_data(g, int(m.group(1)))
     for n in nums:
         state_file(n).unlink(missing_ok=True)
         v = load_vps(n)
@@ -2048,7 +2211,7 @@ def backup_totals(guild: discord.Guild, n: int) -> dict:
             size += int(str(k).split("|", 1)[0])
         except ValueError:
             pass
-    cats = vps_categories(guild, n)
+    cats = [c for g in (db_guilds() or [guild]) for c in vps_categories(g, n)]
     chans = sum(1 for c in cats for ch in c.channels if ch.name != RECORDS)
     return {"state": st, "files": len(st), "bytes": size, "channels": chans, "categories": len(cats)}
 
@@ -3050,6 +3213,227 @@ async def cmd_confirm(interaction: discord.Interaction, user: str):
     await post_warning(interaction.client, ui("ok", "Backups resumed", f"<@{interaction.user.id}> confirmed. Backups run again."))
 
 
+# ------------------------------------------------------------------ more database servers (/addserver)
+REQUIRED_PERMS = ("manage_channels", "manage_guild", "kick_members", "manage_roles", "view_audit_log",
+                  "view_channel", "send_messages", "embed_links", "attach_files", "read_message_history")
+
+
+def invite_url(bot, gid: int) -> str:
+    """Discord OAuth2 invite link that is locked to one server (Administrator, so every needed permission is there)."""
+    return discord.utils.oauth_url(bot.user.id, permissions=discord.Permissions(administrator=True),
+                                   guild=discord.Object(id=gid), scopes=("bot", "applications.commands"),
+                                   disable_guild_select=True)
+
+
+def server_total() -> int:
+    return len(db_guild_ids()) + (1 if main_gid() else 0)
+
+
+def missing_perms(g: discord.Guild) -> list[str]:
+    p = g.me.guild_permissions
+    if p.administrator:
+        return []
+    return [n.replace("_", " ") for n in REQUIRED_PERMS if not getattr(p, n)]
+
+
+async def setup_extra_server(bot, g: discord.Guild, k: int) -> None:
+    """Wipe the server (members, channels, invites), make it private, mark it as a database server."""
+    await wipe_guild(g)
+    await ensure_marker(g)                      # "mas-backups": from now on this server is never wiped by mistake
+    kw: dict = {"name": f"MAS Database #{k} | V{VERSION}"}
+    logo = await bot.ident.fetch_logo()
+    if logo:
+        kw["icon"] = logo
+    try:
+        await g.edit(reason="MAS database server", **kw)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not set the name/logo of %s: %s", g.name, e)
+
+
+async def notify_full(guild: discord.Guild, channel, vps_n: int, stats: dict | None = None) -> None:
+    """Every database server is full: tell the owner EVERYWHERE the bot can talk (DM, talk channel, warnings, main server)."""
+    bot = BOT
+    saved = f" {stats['ok']:,} files were saved before it stopped." if stats and stats.get("ok") else ""
+    e = ui("error", "Database servers are full - add another one",
+           f"The backup of **vps-{vps_n}** stopped because every database server reached Discord's limit of "
+           f"**{CHANNEL_LIMIT} channels per server**.{saved} Nothing that was already saved is lost.",
+           [("➕ What to do", "**1.** Create a new empty Discord server that **you own**.\n"
+                             "**2.** Copy its **server ID** (Developer Mode → right-click the server icon → Copy Server ID).\n"
+                             "**3.** Run `/addserver server_id:<that ID>`. If I'm not in it yet, I send you an invite link."),
+            ("▶️ After that", f"Run `/backup vps:{vps_n}` again. It continues where it stopped."),
+            ("🗄️ Database servers now", f"{len(db_guild_ids())} (a bot can use up to {MAX_SERVERS} servers)")])
+    await announce(guild, channel, e, ping=True)            # #talk-cmds-here + DM to the owner
+    try:
+        await post_warning(bot, e)                          # #warnings in the database AND the main server
+    except Exception as ex:  # noqa: BLE001
+        log.warning("could not post the 'servers full' warning: %s", ex)
+    mg = bot.get_guild(main_gid()) if main_gid() else None
+    if mg is not None:
+        try:
+            await (await ensure_talk(mg)).send(embed=e)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("could not post in the main server: %s", ex)
+
+
+# ---- main server: private list of every database server (#servers-setuped)
+async def ensure_servers_channel(mg: discord.Guild) -> discord.TextChannel:
+    ch = discord.utils.get(mg.text_channels, name=SERVERS_CH)
+    if ch is not None:
+        return ch
+    ow = {mg.default_role: discord.PermissionOverwrite(view_channel=False),
+          mg.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True,
+                                             read_message_history=True, manage_messages=True)}
+    owner = mg.get_member(mg.owner_id)
+    if owner is not None:
+        ow[owner] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
+    return await mg.create_text_channel(
+        SERVERS_CH, overwrites=ow, topic="Every database server this bot uses (private). DO NOT DELETE. The bot reads this to find its databases.")
+
+
+def server_embed(bot, k: int, gid: int) -> discord.Embed:
+    g = bot.get_guild(gid)
+    e = discord.Embed(title=f"🗄️ {'Primary database' if k == 1 else 'Database'} #{k}",
+                      description=f"Server ID: `{gid}`", color=discord.Color(0x00E5FF if g else 0xE74C3C))
+    if g is None:
+        e.add_field(name="⚠️ Status", value="The bot is not in this server right now.", inline=False)
+    else:
+        used = len(g.channels)
+        holds = sorted({c.name for c in g.categories if re.fullmatch(r"vps-\d+(-\d+)?", c.name)})
+        e.add_field(name="📛 Name", value=g.name[:100], inline=True)
+        e.add_field(name="📂 Channels", value=f"{used}/{CHANNEL_LIMIT}" + (" 🔴 full" if used >= CHANNEL_LIMIT - CHANNEL_RESERVE else ""), inline=True)
+        e.add_field(name="👥 Members", value=str(g.member_count), inline=True)
+        e.add_field(name="💾 Holds", value=(", ".join(holds)[:900] or "nothing yet"), inline=False)
+        e.add_field(name="🔗 Open", value=f"https://discord.com/channels/{gid}", inline=False)
+    e.set_footer(text=f"{FOOTER} • private - do not share")
+    return e
+
+
+async def update_servers_channel(bot) -> None:
+    mg = bot.get_guild(main_gid()) if main_gid() else None
+    if mg is None:
+        return
+    try:
+        ch = await ensure_servers_channel(mg)
+        have: dict[int, discord.Message] = {}
+        async for m in ch.history(limit=600):
+            if m.author.id == bot.user.id and m.embeds:
+                mt = SERVER_ID_RE.search(m.embeds[0].description or "")
+                if mt:
+                    have.setdefault(int(mt.group(1)), m)
+        cache = bot.srv_cache
+        for k, gid in enumerate(db_guild_ids(), 1):
+            emb = server_embed(bot, k, gid)
+            sig = json.dumps(emb.to_dict(), sort_keys=True)
+            m = have.get(gid)
+            if m is None:
+                await ch.send(embed=emb)
+            elif cache.get(gid) != sig:
+                await m.edit(embed=emb)
+            cache[gid] = sig
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not update #%s: %s", SERVERS_CH, e)
+
+
+async def load_registry(bot) -> None:
+    """Learn the extra database servers from #servers-setuped in the main server (so they survive a lost config)."""
+    mg = bot.get_guild(main_gid()) if main_gid() else None
+    ch = mg and discord.utils.get(mg.text_channels, name=SERVERS_CH)
+    if not ch:
+        return
+    found = []
+    async for m in ch.history(limit=600, oldest_first=True):
+        if m.author.id != bot.user.id or not m.embeds:
+            continue
+        mt = SERVER_ID_RE.search(m.embeds[0].description or "")
+        tt = re.search(r"#(\d+)", m.embeds[0].title or "")
+        if mt:
+            found.append((int(tt.group(1)) if tt else 999, int(mt.group(1))))
+    cfg, known, changed = load_cfg(), db_guild_ids(), False
+    for _, gid in sorted(found):
+        if gid not in known and gid != main_gid():
+            cfg.setdefault("extra_guild_ids", []).append(gid)
+            known.append(gid)
+            changed = True
+    if changed:
+        save_cfg(cfg)
+        log.info("learned %d database server(s) from #%s", len(known) - 1, SERVERS_CH)
+
+
+@app_commands.command(name="addserver", description="Add another database server (use it when the current ones are full)")
+@app_commands.describe(server_id="ID of the Discord server to turn into a new database server")
+async def cmd_addserver(interaction: discord.Interaction, server_id: str):
+    if not await guard(interaction):
+        return
+    bot, chan = interaction.client, interaction.channel
+    raw = server_id.strip()
+    if not raw.isdigit() or not 15 <= len(raw) <= 21:
+        await reply(interaction, ui("error", "That is not a server ID",
+                                    "A server ID is a long number. Turn on **Developer Mode** (Settings → Advanced), "
+                                    "right-click the server icon and choose **Copy Server ID**."), ephemeral=True)
+        return
+    gid, cfg = int(raw), load_cfg()
+    if gid == int(cfg.get("guild_id", 0)) or gid in extra_ids():
+        await reply(interaction, ui("info", "Already a database server", "This server is already one of your database servers."), ephemeral=True)
+        return
+    if gid == main_gid():
+        await reply(interaction, ui("error", "That is your main server", "The main server cannot also be a database server."), ephemeral=True)
+        return
+    if server_total() >= MAX_SERVERS:
+        await reply(interaction, ui("error", "Server limit reached", f"One bot can use at most **{MAX_SERVERS}** servers."), ephemeral=True)
+        return
+    g = bot.get_guild(gid)
+    if g is None:                                  # not in that server yet: give the invite (OAuth2) link
+        pend = [int(x) for x in cfg.get("pending_servers", [])]
+        if gid not in pend:
+            pend.append(gid)
+            cfg["pending_servers"] = pend
+            save_cfg(cfg)
+        await reply(interaction, ui(
+            "info", "Add me to that server first", f"I'm not in server `{gid}` yet.",
+            [("🔗 Invite link (Discord OAuth2)", f"[Click here to add me]({invite_url(bot, gid)})\nYou must own the server."),
+             ("▶️ Then", f"Run `/addserver server_id:{gid}` again.")]), ephemeral=True)
+        return
+    if g.owner_id != interaction.user.id:
+        await reply(interaction, ui("error", "You must own that server", "I only wipe servers that you own."), ephemeral=True)
+        return
+    miss = missing_perms(g)
+    if miss:
+        await reply(interaction, ui(
+            "error", "I need more permissions there", "Give me **Administrator**, or at least: " + ", ".join(f"`{m}`" for m in miss) + ".",
+            [("🔗 Re-authorize (Administrator)", f"[Click here]({invite_url(bot, gid)})")]), ephemeral=True)
+        return
+    humans = sum(1 for m in g.members if not m.bot)
+    if humans >= 10:
+        await reply(interaction, ui("error", "That server has too many members",
+                                    f"It has **{humans}** members. A database server must have **fewer than 10** (they are all kicked)."), ephemeral=True)
+        return
+    view = Confirm(interaction.user.id, "Yes, wipe it and use it", "Cancel")
+    await reply(interaction, ui(
+        "warn", f"Use {g.name} as a database server?",
+        f"This **deletes every channel** and **kicks every member** (except you and me) of **{g.name}**, makes it private and uses it to store backups.",
+        [("⚠️ This cannot be undone", "Anything in that server is gone for good."),
+         ("📂 Why", f"Discord allows {CHANNEL_LIMIT} channels per server. Backups continue in the new server when the others are full.")]), view=view)
+    await view.wait()
+    if not view.ok:
+        return
+    k = len(db_guild_ids()) + 1
+    try:
+        await setup_extra_server(bot, g, k)
+    except Exception as e:  # noqa: BLE001
+        log.exception("/addserver failed: %s", e)
+        await chan.send(embed=ui("error", "Could not set up that server", f"```{str(e)[:500]}```\nNothing else was changed."))
+        return
+    cfg = load_cfg()
+    cfg["extra_guild_ids"] = [*[int(x) for x in cfg.get("extra_guild_ids", [])], gid]
+    cfg["pending_servers"] = [x for x in cfg.get("pending_servers", []) if int(x) != gid]
+    save_cfg(cfg)
+    await update_servers_channel(bot)
+    await chan.send(embed=ui(
+        "ok", f"Database #{k} is ready", f"**{g.name}** is now a private database server (`{gid}`).",
+        [("📂 Listed in", f"#{SERVERS_CH} (main server)" if main_gid() else "the bot config", True),
+         ("▶️ Next", "Run `/backup` again if a backup stopped because the servers were full.", True)]))
+
+
 # ---- main server: control panel + one live status channel per VPS
 async def post_status(bot, ch: discord.TextChannel, embed: discord.Embed) -> None:
     async for m in ch.history(limit=10):
@@ -3066,6 +3450,7 @@ async def sync_main(bot, status: bool = True) -> None:
         return
     await ensure_talk(mg)
     await ensure_warn(mg)
+    await update_servers_channel(bot)
     cat = discord.utils.get(mg.categories, name=VPS_CAT) or await mg.create_category(VPS_CAT)
     every = max(30, int(bot.cfg.get("status_seconds", 120)))
     chans = {}
@@ -3111,6 +3496,9 @@ class Bot(discord.Client):
         intents = discord.Intents.default()
         intents.members = True                      # privileged: enable in the Developer Portal
         super().__init__(intents=intents)
+        global BOT
+        BOT = self
+        self.srv_cache: dict = {}
         self.cfg = cfg
         self.tree = app_commands.CommandTree(self)
         self.lock = asyncio.Lock()
@@ -3121,7 +3509,7 @@ class Bot(discord.Client):
 
     async def setup_hook(self):
         cmds = (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_backup, cmd_copy, cmd_import,
-                cmd_focus, cmd_confirm)
+                cmd_focus, cmd_confirm, cmd_addserver)
         for gid in [self.gid] + ([self.mid] if self.mid else []):
             g = discord.Object(id=gid)
             for c in cmds:
@@ -3146,8 +3534,13 @@ class Bot(discord.Client):
                 log.error("could not create #%s: %s", TALK, e)
         if self.mid and self.get_guild(self.mid) is None:
             log.warning("Bot isn't in the main server (%s). Invite it, then restart.", self.mid)
+        try:
+            await load_registry(self)                # extra database servers listed in #servers-setuped
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not read #%s: %s", SERVERS_CH, e)
+        keep = {self.gid, self.mid, *extra_ids(), *[int(x) for x in load_cfg().get("pending_servers", [])]}
         for g in self.guilds:
-            if g.id not in (self.gid, self.mid):
+            if g.id not in keep:
                 log.warning("leaving unexpected server %s", g.name)
                 await g.leave()
         if not self._started:                       # on_ready can fire again after a reconnect
@@ -3173,6 +3566,12 @@ class Bot(discord.Client):
                     log.warning("could not add the commands to the main server: %s", e)
                 await sync_main(self, status=False)
                 asyncio.create_task(self.ident.apply_main())
+            elif guild.id in [int(x) for x in load_cfg().get("pending_servers", [])]:
+                dg = self.get_guild(self.gid)
+                owner = dg and (dg.get_member(dg.owner_id) or await dg.fetch_member(dg.owner_id))
+                if owner:
+                    await owner.send(embed=ui("ok", "I joined your new server",
+                                              f"Now run `/addserver server_id:{guild.id}` in the command channel to finish."))
         except Exception as e:  # noqa: BLE001
             log.exception("on_guild_join failed: %s", e)
 
@@ -3203,7 +3602,7 @@ class Bot(discord.Client):
             await asyncio.sleep(every)
 
     async def on_member_join(self, member: discord.Member):
-        if member.guild.id != self.gid or member.id in allowed_ids(member.guild):
+        if member.guild.id not in db_guild_ids() or member.id in allowed_ids(member.guild):
             return
         try:
             await member.kick(reason="MAS backup server is private")
