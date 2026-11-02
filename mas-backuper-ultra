@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.5.0"
-MAS_UPDATED="2026-11-01 22:00 UTC"
+MAS_VERSION="6.7.0"
+MAS_UPDATED="2026-11-02 14:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
 
@@ -28,8 +28,9 @@ MM_ORG=$'\e[1;38;5;215m'    # orange brand / highlight
 MM_SUBTITLE="Pterodactyl Panel Toolkit"   # <- change this text if you want another subtitle
 MM_W=44
 
-mm_row() {   # mm_row <plain text> <colour> [visible-length]  (centres, then colours)
+mm_row() {   # mm_row <plain text> <colour> [visible-length]  (centres, then colours; long text is shortened)
   local t="$1" c="$2" n="${3:-${#1}}" pad l r
+  if (( n > MM_W - 2 )); then t="${t:0:MM_W-3}…"; n=$(( MM_W - 2 )); fi   # a long title can't break the frame
   pad=$(( MM_W - n )); l=$(( pad / 2 )); r=$(( pad - l ))
   printf '%s┃%s%*s%s%s%s%*s%s┃%s\n' "$MM_BOX" "$RST" "$l" '' "$c" "$t" "$RST" "$r" '' "$MM_BOX" "$RST"
 }
@@ -58,6 +59,23 @@ mm_prompt() {  # prints the prompt, caller does the read
   printf '\n %sSelect an option:%s ' "$MM_TITLE" "$RST"
 }
 
+mm_div() {   # thin divider the same width as the header box
+  printf '  %s%s%s\n' "$MM_SUB" "$(printf '─%.0s' $(seq 1 $((MM_W + 2))))" "$RST"
+}
+
+ultra_is_on() {   # Ultra Storage switch lives in config.json  ("ultra": true)
+  grep -q '"ultra": *true' "$DATA_DIR/config.json" 2>/dev/null
+}
+
+mm_status() {   # two live lines under the header: is the bot up, which storage mode is on
+  local b u
+  if bot_running; then b="${GRN}● running${RST}"; else b="${RED}○ stopped${RST}"; fi
+  if ultra_is_on; then u="🧊 Ultra Storage ${GRN}${BOLD}ON${RST}"; else u="${YLW}Standard${RST} ${MM_SUB}(channel per folder)${RST}"; fi
+  printf '  %sBot      %s %s\n' "$MM_SUB" "$RST" "$b"
+  printf '  %sStorage  %s %s\n' "$MM_SUB" "$RST" "$u"
+  mm_div
+}
+
 err()   { echo "  ${RED}✖ $*${RST}"; }
 ok()    { echo "  ${GRN}✔ $*${RST}"; }
 warn()  { echo "  ${YLW}⚠ $*${RST}"; }
@@ -80,7 +98,9 @@ CLI (used by the menu):
   check          exit 0 if the bot is in the configured server, 3 if not
   inspect        read-only: 0 = empty server, 4 = backup data found, 3 = bot not in server
   protect        make a server that has backups private without deleting anything
-  run            start the bot (/setup /vps add /vps list /nodes /info-vps /sshx /access /backup /copybackup /importbackup /focusbackup)
+  ultra [on|off|toggle|status]   Ultra Storage mode: ONE channel per VPS, files tagged c<path<to<folder<
+  (main server) #bot-data-backup holds the bot's own data in Ultra form: c<mas<overview<  c<mas<config<  c<mas<vps<vps-N<
+  run            start the bot (/setup /vps add /vps list /nodes /info-vps /sshx /access /ultra /backup /copybackup /importbackup /focusbackup)
 """
 from __future__ import annotations
 
@@ -111,8 +131,8 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.5.0"
-UPDATED = "2026-11-01 22:00 UTC"
+VERSION = "6.7.0"
+UPDATED = "2026-11-02 14:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
@@ -126,15 +146,22 @@ SYSTEM_CAT = "mas-system"
 RECORDS = "read-paths-mas"      # per-VPS index channel (inside the vps-N category)
 TALK = "talk-cmds-here"         # commands + chat, NOT in a category, never touched by backups/focus
 MAX_PER_CATEGORY = 50
+ULTRA_CH = "ultra-storage"      # Ultra Storage: the ONE channel that holds every file of a VPS
+ULTRA_ROOT = "c"                # every Ultra label starts with this:  c<home<container<data<folder<
+ULTRA_SEP = "<"                 # Discord channel names cannot contain "<", so the label lives in the message text
+MAX_VPS_PER_SERVER = 250        # at most this many VPS are backed up in ONE Discord (database) server (cfg: max_vps_per_server)
+SLIM_CAT = "ultra-group-"       # shared categories (50 channels each) that hold the one-channel-per-VPS Ultra channels
+SLIM_RE = re.compile(r"ultra-vps-(\d+)")      # name of that channel: ultra-vps-<N>  (path index + data together)
+ULTRA_DEPTH = 3                 # small files are bundled per this many folder levels (cfg key: ultra_depth)
 MAX_SERVERS = 500               # servers one bot can use (database servers + the main server)
 CHANNEL_LIMIT = 500             # Discord: channels + categories per server
 CHANNEL_RESERVE = 6             # keep a few free so the index channel etc. always fits
+SELF_CH = "bot-data-backup"     # main server: the bot's OWN data (servers, VPS list, settings), always in Ultra form
 SERVERS_CH = "servers-setuped"  # main server: private list of every database server
 PTR_TAG = "➡️ Other data"       # last line of a path channel when the rest of the data is in another server
 SERVER_ID_RE = re.compile(r"Server ID: `(\d{15,25})`")
 PTR_RE = re.compile(r"\(`(\d{15,25})`\)")
 BOT = None                      # the running Bot (set in Bot.__init__)
-ULTRA_CH = "ultra-storage"      # single channel used when ultra_storage mode is on
 NO_MENTIONS = discord.AllowedMentions.none()
 
 DEFAULT_EXCLUDE = [
@@ -473,6 +500,9 @@ class LocalSFTP:
     async def makedirs(self, p, exist_ok=True):
         await asyncio.to_thread(os.makedirs, p, exist_ok=exist_ok)
 
+    async def isdir(self, p):
+        return await asyncio.to_thread(os.path.isdir, p)
+
     async def posix_rename(self, a, b):
         await asyncio.to_thread(os.replace, a, b)
 
@@ -583,6 +613,25 @@ def bucket_of(path: str, depth: int) -> str:
     return "/" + "/".join(dirs[:depth]) if dirs else "/"
 
 
+def ultra_on(cfg: dict | None = None) -> bool:
+    """Ultra Storage mode switch (config.json -> "ultra": true). Toggle it with /ultra or the menu."""
+    return bool((cfg if cfg is not None else load_cfg()).get("ultra", False))
+
+
+def ultra_label(folder: str) -> str:
+    """'/home/container/data/mods'  ->  'c<home<container<data<mods<'   (root '/' -> 'c<')"""
+    parts = [p for p in folder.split("/") if p]
+    return ULTRA_ROOT + ULTRA_SEP + "".join(p + ULTRA_SEP for p in parts)
+
+
+def ultra_text(folder: str, tail: str = "") -> str:
+    """Message text for an upload in Ultra mode (Discord allows 2000 chars; the END of a long path is kept)."""
+    lab = ultra_label(folder)
+    if len(lab) > 1700:
+        lab = ULTRA_ROOT + ULTRA_SEP + "…" + ULTRA_SEP + lab[-1690:].split(ULTRA_SEP, 1)[-1]
+    return (lab + tail)[:1990]
+
+
 def part_limit(guild: discord.Guild, cfg: dict) -> int:
     cap = int(cfg.get("max_part_mb", 20)) * 1024 * 1024
     return max(1024 * 1024, min(cap, guild.filesize_limit) - 64 * 1024)
@@ -603,8 +652,11 @@ def backup_findings(guild: discord.Guild) -> list[str]:
     if discord.utils.get(guild.text_channels, name=RECORDS):
         found.append(f"#{RECORDS}")
     for c in guild.categories:
-        if c.name == SYSTEM_CAT or re.fullmatch(r"vps-\d+(-\d+)?", c.name):
+        if c.name == SYSTEM_CAT or re.fullmatch(r"vps-\d+(-\d+)?", c.name) or c.name.startswith(SLIM_CAT):
             found.append(f"category {c.name}")
+    for c in guild.text_channels:
+        if SLIM_RE.fullmatch(c.name):
+            found.append(f"#{c.name}")
     return found
 
 
@@ -657,8 +709,67 @@ def vps_categories(guild: discord.Guild, vps: int) -> list[discord.CategoryChann
 
 def vps_has_data(guild: discord.Guild, vps: int) -> bool:
     """True if vps-N holds backed-up files (a category with only the empty index channel doesn't count)."""
-    return any(ch.name != RECORDS for g in (db_guilds() or [guild])
-               for cat in vps_categories(g, vps) for ch in cat.channels)
+    gs = db_guilds() or [guild]
+    if any(ch.name != RECORDS for g in gs for cat in vps_categories(g, vps) for ch in cat.channels):
+        return True
+    return any((sc := slim_channel_of(g, vps)) is not None and sc.last_message_id is not None for g in gs)
+
+
+def max_vps(cfg: dict | None = None) -> int:
+    """How many different VPS one database server may hold (default 250)."""
+    try:
+        return max(1, int((cfg if cfg is not None else load_cfg()).get("max_vps_per_server", MAX_VPS_PER_SERVER)))
+    except (TypeError, ValueError):
+        return MAX_VPS_PER_SERVER
+
+
+def slim_channel_of(g: discord.Guild, vps: int):
+    """Ultra's one-channel-per-VPS channel (index + data together), or None."""
+    return discord.utils.get(g.text_channels, name=f"ultra-vps-{vps}")
+
+
+def guild_vps(g: discord.Guild) -> set[int]:
+    """Numbers of every VPS that has anything stored in this server (either layout)."""
+    out: set[int] = set()
+    for c in g.categories:
+        m = re.fullmatch(r"vps-(\d+)(-\d+)?", c.name)
+        if m:
+            out.add(int(m.group(1)))
+    for ch in g.text_channels:
+        m = SLIM_RE.fullmatch(ch.name)
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def guild_vps_room(g: discord.Guild, vps: int) -> bool:
+    """True if this VPS already lives in the server, or the server holds fewer than 250 VPS."""
+    have = guild_vps(g)
+    return vps in have or len(have) < max_vps()
+
+
+def index_channel(g: discord.Guild, vps: int):
+    """The path-index channel of vps-N in this server: the classic read-paths-mas, else Ultra's ultra-vps-N."""
+    for cat in vps_categories(g, vps):
+        ch = discord.utils.get(cat.text_channels, name=RECORDS)
+        if ch is not None:
+            return ch
+    return slim_channel_of(g, vps)
+
+
+async def create_slim(g: discord.Guild, vps: int):
+    """Create ultra-vps-N inside the first shared group category that has room (50 channels each).
+    One channel per VPS means 250 VPS need only ~255 of Discord's 500 channel slots."""
+    groups = [c for c in g.categories if c.name.startswith(SLIM_CAT)]
+    cat = next((c for c in sorted(groups, key=lambda c: (len(c.name), c.name)) if len(c.channels) < MAX_PER_CATEGORY), None)
+    if not guild_room(g, 1 if cat is not None else 2):
+        raise NeedMoreServers("every database server is full")
+    if cat is None:
+        nums = [int(c.name[len(SLIM_CAT):]) for c in groups if c.name[len(SLIM_CAT):].isdigit()]
+        cat = await g.create_category(f"{SLIM_CAT}{max(nums, default=0) + 1}")
+    return await g.create_text_channel(
+        f"ultra-vps-{vps}", category=cat,
+        topic=f"Ultra Storage of vps-{vps}: files + path index in one channel, tagged {ultra_label('/user/data/folder')}  {WARNING}")
 
 
 async def delete_many(items, reason: str, batch: int = 5) -> None:
@@ -730,6 +841,14 @@ async def ensure_category(guild: discord.Guild, vps: int, k: int = 1) -> discord
 
 
 async def records_channel(guild: discord.Guild, vps: int) -> discord.TextChannel:
+    """The path index of vps-N in this server (created if missing).
+    Ultra ON and the VPS has no classic category yet -> ultra-vps-N (ONE channel: index + data).
+    Otherwise the classic vps-N category with read-paths-mas."""
+    ch = index_channel(guild, vps)
+    if ch is not None:
+        return ch
+    if ultra_on():
+        return await create_slim(guild, vps)
     cat = await ensure_category(guild, vps)
     ch = discord.utils.get(cat.text_channels, name=RECORDS)
     return ch or await guild.create_text_channel(RECORDS, category=cat, topic=f"path index for vps-{vps}")
@@ -739,14 +858,13 @@ async def records_channel_any(vps: int) -> discord.TextChannel:
     """The path channel of vps-N in whichever database server already has it, else in the first one with room."""
     gs = db_guilds()
     for g in gs:
-        for cat in vps_categories(g, vps):
-            ch = discord.utils.get(cat.text_channels, name=RECORDS)
-            if ch is not None:
-                return ch
+        ch = index_channel(g, vps)
+        if ch is not None:
+            return ch
     for g in gs:
-        if guild_room(g, 2):
+        if guild_vps_room(g, vps) and guild_room(g, 2):      # max 250 VPS per server, then the next server is used
             return await records_channel(g, vps)
-    raise NeedMoreServers("every database server is full")
+    raise NeedMoreServers("every database server is full (500 channels or 250 VPS)")
 
 
 async def delete_vps_data_everywhere(n: int) -> None:
@@ -762,46 +880,20 @@ async def delete_vps_data(guild: discord.Guild, n: int) -> None:
             await cat.delete(reason=f"focusbackup vps-{n}")
         except Exception as e:  # noqa: BLE001
             log.error("could not delete category %s: %s", cat.name, e)
+    sc = slim_channel_of(guild, n)                     # Ultra's one-channel layout
+    if sc is not None:
+        group = sc.category
+        await delete_many([sc], f"focusbackup vps-{n}")
+        if group is not None and group.name.startswith(SLIM_CAT) and len(group.channels) <= 1:
+            try:
+                await group.delete(reason="MAS: empty Ultra group")
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not delete the empty group %s: %s", group.name, e)
 
 
 async def bucket_channel(guilds, vps, bucket, cache):
-    """The channel that stores files for this folder.
-
-    Ultra Storage mode (cfg ultra_storage=True): every file for a VPS goes into
-    a single channel named ULTRA_CH inside the vps-N category.  One channel per
-    VPS instead of one per folder — saves hundreds of Discord channel slots.
-    Import works unchanged: paths come from the index records, not channel names,
-    and write_remote already calls sftp.makedirs() to recreate missing folders.
-
-    Normal mode: one channel per bucket path (original behaviour)."""
-    cfg = load_cfg()
-    if cfg.get("ultra_storage"):
-        key = (vps, "__ultra__")
-        if key in cache:
-            return cache[key]
-        for g in guilds:                               # existing ultra channel anywhere?
-            for cat in vps_categories(g, vps):
-                ch = discord.utils.get(cat.text_channels, name=ULTRA_CH)
-                if ch:
-                    cache[key] = ch
-                    return ch
-        for g in guilds:                               # create in first server with room
-            cats = vps_categories(g, vps)
-            cat = next((c for c in cats if len(c.channels) < MAX_PER_CATEGORY), None)
-            if cat is not None and guild_room(g, 1):
-                break
-            if cat is None and guild_room(g, 2):
-                cat = await ensure_category(g, vps, len(cats) + 1)
-                break
-        else:
-            raise NeedMoreServers("every database server is full")
-        ch = await g.create_text_channel(
-            ULTRA_CH, category=cat,
-            topic=f"ultra-storage for vps-{vps} | all file data in one channel")
-        cache[key] = ch
-        return ch
-
-    # ── normal mode: one channel per folder bucket ───────────────────────────
+    """The channel that stores this folder. Uses the first database server that still has room;
+    raises NeedMoreServers when every one of them is full."""
     key = (vps, bucket)
     if key in cache:
         return cache[key]
@@ -816,12 +908,46 @@ async def bucket_channel(guilds, vps, bucket, cache):
         cat = next((c for c in cats if len(c.channels) < MAX_PER_CATEGORY), None)
         if cat is not None and guild_room(g, 1):
             break
-        if cat is None and guild_room(g, 2):
+        if cat is None and guild_vps_room(g, vps) and guild_room(g, 2):
             cat = await ensure_category(g, vps, len(cats) + 1)
             break
     else:
-        raise NeedMoreServers("every database server is full")
+        raise NeedMoreServers("every database server is full (500 channels or 250 VPS)")
     ch = await g.create_text_channel(chan_name(bucket), category=cat, topic=bucket)
+    cache[key] = ch
+    return ch
+
+
+async def ultra_channel(guilds, vps, cache):
+    """Ultra Storage: the single channel that holds every file of this VPS (created once, reused forever).
+    Looks in every database server first; creates it where there is room; raises NeedMoreServers if none has."""
+    key = (vps, "__ultra__")
+    if key in cache:
+        return cache[key]
+    for g in guilds:                                   # slim layout: the VPS channel holds index AND data
+        sc = slim_channel_of(g, vps)
+        if sc is not None:
+            cache[key] = sc
+            return sc
+    for g in guilds:
+        for cat in vps_categories(g, vps):
+            ch = discord.utils.get(cat.text_channels, name=ULTRA_CH)
+            if ch is not None:
+                cache[key] = ch
+                return ch
+    for g in guilds:
+        cats = vps_categories(g, vps)
+        cat = next((c for c in cats if len(c.channels) < MAX_PER_CATEGORY), None)
+        if cat is not None and guild_room(g, 1):
+            break
+        if cat is None and guild_vps_room(g, vps) and guild_room(g, 2):
+            cat = await ensure_category(g, vps, len(cats) + 1)
+            break
+    else:
+        raise NeedMoreServers("every database server is full (500 channels or 250 VPS)")
+    ch = await g.create_text_channel(
+        ULTRA_CH, category=cat,
+        topic=f"Ultra Storage of vps-{vps}: every file is here, tagged {ultra_label('/user/data/folder')}  {WARNING}")
     cache[key] = ch
     return ch
 
@@ -845,7 +971,7 @@ async def parse_records(msg: discord.Message) -> list[dict]:
     """Index batches are .jsonl attachments: one JSON record per line."""
     out = []
     for a in msg.attachments:
-        if not a.filename.endswith(".jsonl"):
+        if not (a.filename.startswith("paths") and a.filename.endswith(".jsonl")):   # a user's own .jsonl file in the Ultra channel is data, not an index
             continue
         text = (await a.read()).decode("utf-8", "replace")
         for ln in text.splitlines():
@@ -869,7 +995,7 @@ async def read_exact(f, n: int) -> bytes:
 
 
 # ------------------------------------------------------------------ GUI helpers (every message is an embed)
-FOOTER = "MAS GUI v6.5"
+FOOTER = "MAS GUI v6.7"
 _KIND = {"info": ("ℹ️", 0x00E5FF), "ok": ("✅", 0x2ECC71), "warn": ("⚠️", 0xF1C40F),
          "error": ("❌", 0xE74C3C), "wait": ("⏳", 0x3498DB)}
 
@@ -957,7 +1083,8 @@ class Backup:
         self.rps = {rp.guild.id: rp}                  # path channel per database server
         self.limit = min(part_limit(g, cfg) for g in self.guilds)
         self.small = min(int(float(cfg.get("small_file_mb", 1)) * 1048576), self.limit // 8)
-        self.depth = int(cfg.get("bucket_depth", 2))
+        self.ultra = ultra_on(cfg)                    # Ultra Storage: one channel, path labels in the message text
+        self.depth = int(cfg.get("ultra_depth", ULTRA_DEPTH)) if self.ultra else int(cfg.get("bucket_depth", 2))
         self.slots = asyncio.Semaphore(int(cfg.get("upload_concurrency", 6)))   # uploads in flight
         self.read_sem = asyncio.Semaphore(int(cfg.get("read_concurrency", 16)))  # small-file reads
         self.big_sem = asyncio.Semaphore(3)                                      # big files at once
@@ -990,6 +1117,8 @@ class Backup:
         }
         if member:
             r["member"] = member
+        if self.ultra:
+            r["u"] = 1                                # stored in the Ultra channel (restore shows it)
         self.records.append(r)
         self.state[path] = key
         self.stats["ok"] += 1
@@ -1039,8 +1168,7 @@ class Backup:
         for g in self.guilds:
             rp = self.rps.get(g.id)
             if rp is None:
-                cats = vps_categories(g, n)
-                rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
+                rp = index_channel(g, n)
             if rp is not None:
                 chain.append((g, rp))
         for (g, rp), (ng, nrp) in zip(chain, chain[1:]):
@@ -1060,7 +1188,10 @@ class Backup:
         if self.state.get(path) == key:
             self.stats["skipped"] += 1
             return
-        ch = await bucket_channel(self.guilds, self.v["vps"], bucket_of(path, self.depth), self.cache)
+        if self.ultra:
+            ch = await ultra_channel(self.guilds, self.v["vps"], self.cache)
+        else:
+            ch = await bucket_channel(self.guilds, self.v["vps"], bucket_of(path, self.depth), self.cache)
         if size == 0:
             self.add_record(path, attrs.permissions or 0o644, 0, attrs.mtime or 0,
                             hashlib.sha256(b"").hexdigest(), ch, [], key)
@@ -1087,6 +1218,7 @@ class Backup:
         ent = self.bundles.get(bucket)
         if ent is None:
             ent = (Bundle(), ch)
+            ent[0].bucket = bucket                    # Ultra label of the bundle message
             self.bundles[bucket] = ent
         b = ent[0]
         before = b.size()
@@ -1110,8 +1242,9 @@ class Backup:
         try:
             data = await asyncio.to_thread(b.finish)
             name = f"bundle{SEP}{int(time.time())}{SEP}{next(self.counter)}.tar.gz"
+            text = ultra_text(getattr(b, "bucket", "/"), f"📦 bundle • {len(b.items)} files") if self.ultra else None
             async with self.slots:
-                msg = await send_file(ch, data, name)
+                msg = await send_file(ch, data, name, content=text)
             for path, perm, size, mtime, sha, member, key in b.items:
                 self.add_record(path, perm, size, mtime, sha, ch, [msg.id], key, member=member)
         except Exception as e:  # noqa: BLE001
@@ -1126,9 +1259,9 @@ class Backup:
             log.error("could not write index batch: %s", e)
 
     # ---- big files -> parts uploaded in parallel
-    async def _part(self, ch, data: bytes, fname: str) -> int:
+    async def _part(self, ch, data: bytes, fname: str, text: str | None = None) -> int:
         try:
-            return (await send_file(ch, data, fname)).id
+            return (await send_file(ch, data, fname, content=text)).id
         finally:
             self.slots.release()
 
@@ -1153,8 +1286,11 @@ class Backup:
                             break
                         n += 1
                         h.update(data)
+                        text = None
+                        if self.ultra:                      # c<user<data<folder<file.bin  (part n)
+                            text = ultra_text(posixpath.dirname(path), name + (f"  (part {n})" if size > self.limit else ""))
                         parts.append(asyncio.create_task(
-                            self._part(ch, data, file_label(name, n if size > self.limit else None))))
+                            self._part(ch, data, file_label(name, n if size > self.limit else None), text)))
                 ids = list(await asyncio.gather(*parts))
             self.add_record(path, attrs.permissions or 0o644, size, attrs.mtime or 0,
                             h.hexdigest(), ch, ids, key)
@@ -1196,7 +1332,7 @@ def fmt_time(sec: float) -> str:
     return f"{h}h {m}m {s}s" if h else (f"{m}m {s}s" if m else f"{s}s")
 
 
-def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) -> discord.Embed:
+def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int, ultra: bool = False) -> discord.Embed:
     clean = s["failed"] == 0
     e = discord.Embed(
         title=f"{'✅' if clean else '⚠️'}  VPS-{vps_n} backup {'complete' if clean else 'finished with errors'}",
@@ -1216,7 +1352,8 @@ def backup_embed(vps_n: int, v: dict, s: dict, elapsed: float, channels: int) ->
     e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
     e.add_field(name="📂 Channels used", value=f"{channels:,}", inline=True)
     e.add_field(name="🖥️ Source", value=where, inline=True)
-    e.set_footer(text="MAS GUI v6.5 • Auto Backup")
+    e.add_field(name="🧊 Storage mode", value="**Ultra** (one channel)" if ultra else "Standard (channel per folder)", inline=True)
+    e.set_footer(text="MAS GUI v6.7 • Auto Backup")
     return e
 
 
@@ -1257,7 +1394,8 @@ async def announce(guild: discord.Guild, channel, embed: discord.Embed, ping: bo
 
 
 def restore_embed(vps_n: int, v: dict, prog: dict, nbytes: int, elapsed: float, total: int,
-                  src: int | None = None, skipped: int = 0) -> discord.Embed:
+                  src: int | None = None, skipped: int = 0, folders: int = 0, n_ultra: int = 0,
+                  ultra: bool = False) -> discord.Embed:
     """vps_n = the VPS that received the files. src = set when the files came from another VPS's backup."""
     clean = prog["failed"] == 0
     if src is not None:
@@ -1278,6 +1416,10 @@ def restore_embed(vps_n: int, v: dict, prog: dict, nbytes: int, elapsed: float, 
     e.add_field(name="⏱️ Time", value=fmt_time(elapsed), inline=True)
     e.add_field(name="🚀 Speed", value=f"{fmt_bytes(speed)}/s", inline=True)
     e.add_field(name="🖥️ Target", value=where, inline=True)
+    if folders:
+        e.add_field(name="📂 Folders created", value=f"{folders:,} missing folder(s) were created, then the files were put in them", inline=False)
+    if ultra or n_ultra:
+        e.add_field(name="🧊 Ultra Storage", value=f"{n_ultra:,} of {total:,} files came from the Ultra channel" + (" (mode is ON)" if ultra else ""), inline=False)
     if skipped:
         e.add_field(name="🛡️ Skipped (protected)", value=f"{skipped:,} connection/system files (sshx, SSH, IP/port & network configs) were left untouched", inline=False)
     e.set_footer(text=f"{FOOTER} • {'Copy' if src is not None else 'Import'}")
@@ -1297,7 +1439,7 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     bk = Backup(guild, v, cfg, rp, state)
     t0 = time.monotonic()
     log.info("backup of vps%d started", vps_n)
-    await status.update(f"Starting backup of **vps-{vps_n}**…", force=True)
+    await status.update(f"Starting backup of **vps-{vps_n}**…" + ("  🧊 *Ultra Storage*" if bk.ultra else ""), force=True)
     full = False
     try:
         async with open_fs(v) as sftp:
@@ -1327,15 +1469,45 @@ async def run_backup(guild: discord.Guild, vps_n: int, status: Status) -> None:
     v["synced"] = True
     v["last_backup"] = int(time.time())
     save_vps(vps_n, v)
+    request_self_backup()
     s = bk.stats
     log.info("backup of vps%d finished: %s", vps_n, s)
     await status.update(f"Backup of **vps-{vps_n}** finished in {fmt_time(time.monotonic() - t0)}", force=True,
                         pct=100, state="ok" if s["failed"] == 0 else "warn")
     await announce(guild, status.channel,
-                   backup_embed(vps_n, v, s, time.monotonic() - t0, len(bk.cache)))
+                   backup_embed(vps_n, v, s, time.monotonic() - t0, len(bk.cache), ultra=bk.ultra))
 
 
 # ------------------------------------------------------------------ restore
+_DIRS_OK: set[str] = set()        # folders known to exist on the target during this restore
+_DIRS_NEW: set[str] = set()       # folders the restore had to create
+
+
+async def ensure_dir(sftp, d: str) -> None:
+    """Make sure folder d exists on the target. A missing folder (and any missing parent) is created first,
+    then the files are put into it. Every folder that had to be created is counted for the final report."""
+    d = d or "/"
+    if d in _DIRS_OK:
+        return
+    missing, cur = [], d
+    while cur not in ("", "/") and cur not in _DIRS_OK:
+        try:
+            exists = await sftp.isdir(cur)
+        except Exception:  # noqa: BLE001
+            exists = True                              # cannot tell: let makedirs below decide
+        if exists:
+            break
+        missing.append(cur)
+        cur = posixpath.dirname(cur)
+    if missing:
+        await sftp.makedirs(d, exist_ok=True)
+        for m in missing:
+            if m not in _DIRS_NEW:
+                _DIRS_NEW.add(m)
+                log.info("restore: folder %s was missing - created it", m)
+    _DIRS_OK.add(d)
+
+
 async def finalize_remote(sftp, path: str, mode, mtime) -> None:
     await sftp.chmod(path, int(mode))
     if mtime:
@@ -1346,7 +1518,7 @@ async def finalize_remote(sftp, path: str, mode, mtime) -> None:
 
 
 async def write_remote(sftp, path: str, data: bytes, mode, mtime) -> None:
-    await sftp.makedirs(posixpath.dirname(path) or "/", exist_ok=True)
+    await ensure_dir(sftp, posixpath.dirname(path) or "/")
     tmp = path + ".mas-restore"
     try:
         async with sftp.open(tmp, "wb") as f:
@@ -1375,8 +1547,7 @@ async def read_index(vps_n: int) -> dict[str, dict]:
         g = BOT.get_guild(gid) if BOT else None
         if g is None:
             continue
-        cats = vps_categories(g, vps_n)
-        rp = discord.utils.get(cats[0].text_channels, name=RECORDS) if cats else None
+        rp = index_channel(g, vps_n)
         if rp is None:
             continue
         got_rp = True
@@ -1401,7 +1572,7 @@ async def restore_big(guild, sftp, rec) -> None:
     if ch is None:
         raise ValueError(f"channel {rec['ch']} no longer exists")
     path = rec["path"]
-    await sftp.makedirs(posixpath.dirname(path) or "/", exist_ok=True)
+    await ensure_dir(sftp, posixpath.dirname(path) or "/")
     tmp = path + ".mas-restore"
     h = hashlib.sha256()
     try:
@@ -1454,8 +1625,12 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n:
     """Restore the backup of vps_n. With target_n set, paste that backup into ANOTHER vps (/copybackup)."""
     tn = target_n or vps_n
     v = load_vps(tn)
-    await status.update(f"Reading the path index of **vps-{vps_n}**…", force=True)
+    _DIRS_OK.clear()
+    _DIRS_NEW.clear()
+    ultra = ultra_on()
+    await status.update(f"Reading the path index of **vps-{vps_n}**…" + ("  🧊 *Ultra Storage*" if ultra else ""), force=True)
     records = await read_index(vps_n)
+    n_ultra = sum(1 for r in records.values() if r.get("u"))
     # never restore sshx / ssh / ip-port / network files: they would break the way you connect to the VPS
     rules = load_cfg().get("import_skip", IMPORT_SKIP)
     keep = {p: r for p, r in records.items() if not import_skipped(p, rules)}
@@ -1518,7 +1693,8 @@ async def run_import(guild: discord.Guild, vps_n: int, status: Status, target_n:
     await status.update(f"{'Copy into' if target_n else 'Restore of'} **vps-{tn}** finished in {fmt_time(elapsed)}", force=True, pct=100,
                         state="ok" if prog["failed"] == 0 else "warn")
     # DM + @ping the owner (the bot only ever speaks in #talk-cmds-here)
-    await announce(guild, status.channel, restore_embed(tn, v, prog, nbytes, elapsed, total, src=vps_n if target_n else None, skipped=skipped), ping=True)
+    await announce(guild, status.channel, restore_embed(tn, v, prog, nbytes, elapsed, total, src=vps_n if target_n else None, skipped=skipped,
+                                                        folders=len(_DIRS_NEW), n_ultra=n_ultra, ultra=ultra), ping=True)
 
 
 async def backup_job(bot, channel, guild, nums: list[int]) -> None:
@@ -1549,7 +1725,7 @@ async def backup_job(bot, channel, guild, nums: list[int]) -> None:
                     title=f"❌  VPS-{n} backup failed",
                     description=f"```{str(e)[:500]}```\nSee the bot console/log for details.",
                     color=discord.Color(0xE74C3C), timestamp=discord.utils.utcnow())
-                err.set_footer(text="MAS GUI v6.5 • Auto Backup")
+                err.set_footer(text="MAS GUI v6.7 • Auto Backup")
                 await announce(guild, channel, err)
 
 
@@ -1585,6 +1761,7 @@ class Confirm(discord.ui.View):
 async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, login_text: str) -> None:
     """Shared last step of every way to add a VPS (IP + password, or Upterm)."""
     asyncio.create_task(sync_main(interaction.client))        # new status channel in the main server
+    request_self_backup(interaction.client)                   # ...and the bot's own data backup
     guild = dbg(interaction)
     if vps_has_data(guild, n):
         await (await ensure_talk(guild)).send(embed=ui(
@@ -1596,9 +1773,8 @@ async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, logi
                                         ephemeral=True)
     else:
         try:
-            await ensure_category(guild, n)
-            await records_channel(guild, n)
-        except discord.HTTPException as e:             # the server may be full: the backup will use another one
+            await records_channel_any(n)               # in the first server with room (max 250 VPS each)
+        except (discord.HTTPException, NeedMoreServers) as e:   # all full: /backup will ask for a new server
             log.warning("could not pre-create the vps-%d channels: %s", n, e)
         v["synced"] = True            # nothing old to decide about: first backup can start
         save_vps(n, v)
@@ -1825,7 +2001,9 @@ async def send_nodes(interaction: discord.Interaction) -> None:
         else:
             st = "⚪ no backup yet"
         fields.append((f"🖥️ vps-{n}", f"📡 `{where}`\n{st}", len(nums) > 1))
-    await reply(interaction, ui("info", "VPS nodes", f"**{len(fields)}** VPS added • `/info-vps number:<n>` for full details",
+    await reply(interaction, ui("info", "VPS nodes",
+                                f"**{len(fields)}** VPS added • `/info-vps number:<n>` for full details\n"
+                                f"🧊 Ultra Storage: **{'ON' if ultra_on() else 'OFF'}** • change it with `/ultra`",
                                 fields), ephemeral=True)
 
 
@@ -1910,6 +2088,48 @@ async def cmd_nodes(interaction: discord.Interaction):
     await send_nodes(interaction)
 
 
+def ultra_embed(on: bool, changed: bool = False) -> discord.Embed:
+    ex = ultra_label("/home/container/data/world")
+    if on:
+        desc = ("Every file goes into **one channel per VPS** (`#" + ULTRA_CH + "`). No more channel per folder.\n"
+                "Each upload is tagged with its folder, so you can still see where it belongs.")
+    else:
+        desc = "Standard layout: one channel for each folder (up to 2 levels deep)."
+    e = ui("ok" if on else "info", ("Ultra Storage is now " if changed else "Ultra Storage is ") + ("ON" if on else "OFF"), desc, [
+        ("🏷️ Label format", f"`{ex}`\n`{ULTRA_ROOT}{ULTRA_SEP}user{ULTRA_SEP}data{ULTRA_SEP}%folder-name%{ULTRA_SEP}`", False),
+        ("💾 /backup", "All new and changed files go into the Ultra channel." if on else "One channel per folder, as before.", True),
+        ("🛟 /importbackup", "Restores like Ultra. A folder that is missing on the VPS is **created**, then the files are put in it." if on else
+                              "Restores normally. A missing folder is still created automatically.", True),
+        ("🖥️ Capacity", f"Up to **{max_vps()} VPS per Discord server**. In Ultra a new VPS needs just **one channel** "
+                       "(files + path index together), so 250 VPS fit in one server. The next VPS goes to the next database server." if on else
+                       f"Up to **{max_vps()} VPS per Discord server**, but the classic layout uses many channels per VPS, so Discord's 500-channel limit "
+                       "is reached first. Ultra Storage fits far more.", False),
+        ("ℹ️ Good to know", "Files saved before the switch stay where they are and still restore fine (the index knows every channel).\n"
+                           "Run `/focusbackup` if you want the whole backup re-saved in the new layout.\n"
+                           "A backup that is already running keeps the mode it started with.", False)])
+    return e
+
+
+@app_commands.command(name="ultra", description="Ultra Storage: keep every file in ONE channel, tagged c<path<to<folder<")
+@app_commands.describe(mode="on = Ultra Storage, off = one channel per folder, status = just show it")
+@app_commands.choices(mode=[app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off"),
+                            app_commands.Choice(name="status", value="status")])
+async def cmd_ultra(interaction: discord.Interaction, mode: str = "status"):
+    if not await guard(interaction):
+        return
+    m = mode if mode in ("on", "off") else "status"
+    cfg = load_cfg()
+    changed = False
+    if m in ("on", "off"):
+        want = m == "on"
+        changed = ultra_on(cfg) != want
+        cfg["ultra"] = want
+        save_cfg(cfg)
+        log.info("Ultra Storage turned %s by %s", m.upper(), interaction.user)
+        request_self_backup(interaction.client)
+    await reply(interaction, ultra_embed(ultra_on(cfg), changed))
+
+
 @app_commands.command(name="backup", description="Back up a VPS now (0 = all)")
 async def cmd_backup(interaction: discord.Interaction, vps: int = 0):
     if not await guard(interaction):
@@ -1922,7 +2142,8 @@ async def cmd_backup(interaction: discord.Interaction, vps: int = 0):
         await reply(interaction, lock_embed(), ephemeral=True)
         return
     await reply(interaction, ui("wait", "Backup started", "Progress appears below while it runs.",
-                                [("🖥️ VPS", ", ".join(f"vps-{n}" for n in nums))]))
+                                [("🖥️ VPS", ", ".join(f"vps-{n}" for n in nums), True),
+                                 ("🧊 Storage", "Ultra (one channel)" if ultra_on() else "Standard (channel per folder)", True)]))
     await backup_job(interaction.client, interaction.channel, dbg(interaction), nums)
 
 
@@ -1933,7 +2154,7 @@ async def cmd_import(interaction: discord.Interaction, vps: int):
     if not vps_file(vps).exists():
         await reply(interaction, ui("error", f"vps-{vps} isn't added", "Use `/vps add` first."), ephemeral=True)
         return
-    if not any(vps_categories(g, vps) for g in (db_guilds() or [dbg(interaction)])):
+    if not any(index_channel(g, vps) or vps_categories(g, vps) for g in (db_guilds() or [dbg(interaction)])):
         await reply(interaction, ui("error", "No backup data", f"There is no backup of vps-{vps} in any database server."), ephemeral=True)
         return
     view = Confirm(interaction.user.id, "Restore (overwrites files)", "Cancel")
@@ -1995,58 +2216,19 @@ async def cmd_focus(interaction: discord.Interaction, vps: int = 0):
                 m = re.fullmatch(r"vps-(\d+)(-\d+)?", cat.name)
                 if m:
                     await delete_vps_data(g, int(m.group(1)))
+        for g in db_guilds() or [guild]:              # Ultra's ultra-vps-N channels (every server)
+            for sc in [c for c in g.text_channels if SLIM_RE.fullmatch(c.name)]:
+                await delete_vps_data(g, int(SLIM_RE.fullmatch(sc.name).group(1)))
     for n in nums:
         state_file(n).unlink(missing_ok=True)
         v = load_vps(n)
         v["synced"] = True
         save_vps(n, v)
-        await ensure_category(guild, n)
-        await records_channel(guild, n)
+        with contextlib.suppress(NeedMoreServers, discord.HTTPException):
+            await records_channel_any(n)              # fresh index, in the server that has room (max 250 VPS each)
     await ensure_talk(guild)
     await chan.send(embed=ui("ok", "Old backup deleted", "Fresh categories were created. Starting the backup now…"))
     await backup_job(interaction.client, chan, guild, nums)
-
-@app_commands.command(name="ulra", description="Toggle Ultra Storage mode — one channel for all files instead of one per folder")
-@app_commands.describe(state="on — enable  |  off — disable  |  leave blank to see current state")
-@app_commands.choices(state=[
-    app_commands.Choice(name="on  — one channel per VPS (saves Discord channel slots)", value="on"),
-    app_commands.Choice(name="off — one channel per folder (normal mode)", value="off"),
-])
-async def cmd_ulra(interaction: discord.Interaction, state: app_commands.Choice[str] | None = None):
-    if not await guard(interaction):
-        return
-    cfg = load_cfg()
-    current = bool(cfg.get("ultra_storage", False))
-    if state is None:
-        mode_str = (f"**ON** \u2705 — all files go into a single `{ULTRA_CH}` channel per VPS"
-                    if current else "**OFF** — one channel per folder (normal mode)")
-        await reply(interaction, ui(
-            "info", "Ultra Storage Mode",
-            f"Ultra Storage is currently {mode_str}.\n\n"
-            f"**ON** — uses a single `{ULTRA_CH}` channel per VPS category. "
-            f"Saves hundreds of Discord channel slots; ideal for large backups.\n"
-            f"**OFF** — one channel per folder bucket (default).\n\n"
-            f"Use `/ulra on` or `/ulra off` to change. "
-            f"Takes effect on the **next** `/backup` — existing channels are untouched until `/focusbackup`."))
-        return
-    new = state.value == "on"
-    if new == current:
-        await reply(interaction, ui("info", "No change",
-                                    f"Ultra Storage is already **{{'ON' if new else 'OFF'}}**."), ephemeral=True)
-        return
-    cfg["ultra_storage"] = new
-    save_cfg(cfg)
-    if new:
-        desc = (f"From the **next backup** onward every file for a VPS goes into a single "
-                f"`{ULTRA_CH}` channel in its category — no more one-channel-per-folder.\n\n"
-                f"On **import** the bot still restores each file to its original path (paths are "
-                f"stored in the index, not channel names), and missing folders are created "
-                f"automatically. Old per-folder channels are untouched until you run `/focusbackup`.")
-    else:
-        desc = (f"Normal mode restored. The next backup will create one channel per folder again.\n"
-                f"The old `{ULTRA_CH}` channel is untouched until you run `/focusbackup`.")
-    await reply(interaction, ui("ok", f"Ultra Storage {{'enabled \u2705' if new else 'disabled'}}", desc))
-
 
 # ------------------------------------------------------------------ /info-vps
 # One small POSIX shell script is run on the VPS (over SSH, or locally for the bot's own machine).
@@ -2318,6 +2500,7 @@ def backup_totals(guild: discord.Guild, n: int) -> dict:
             pass
     cats = [c for g in (db_guilds() or [guild]) for c in vps_categories(g, n)]
     chans = sum(1 for c in cats for ch in c.channels if ch.name != RECORDS)
+    chans += sum(1 for g in (db_guilds() or [guild]) if slim_channel_of(g, n) is not None)
     return {"state": st, "files": len(st), "bytes": size, "channels": chans, "categories": len(cats)}
 
 
@@ -2471,7 +2654,7 @@ def build_info_embed(n: int, v: dict, live: dict, info: dict | None, bk: dict, s
         e.add_field(name="🛡️ Backup coverage",
                     value="Can't compare files while the VPS is not connected. The numbers above come from the last backup.",
                     inline=False)
-    e.set_footer(text="MAS GUI v6.5 • /info-vps")
+    e.set_footer(text="MAS GUI v6.7 • /info-vps")
     return e
 
 
@@ -3009,8 +3192,7 @@ for _cmd, _names in ((cmd_sshx, ("vps",)), (cmd_access, ("vps",)), (cmd_copy, ("
 WARN = "warnings"                    # channel that gets the warnings (in the main AND the database server)
 VPS_CAT = "VPS"                      # category in the main server: one live-status channel per VPS
 LOGO_URL = "https://raw.githubusercontent.com/itzmasgaming/gui/main/dc-database-logo.png"
-BRAND_SUB = "Sub To ItzMASGaming"
-CHECK_SECONDS = 5                    # how often the database server name + logo (dp) are checked
+BRAND_SUB = "Sub to ItzMASGaming"
 CONFIRM_ID = 1352328694965735635     # may always run /confirm
 PRESENCE_SECONDS = 4                 # bot status rotation (Discord allows ~5 status changes per 20 s, so 4 is the fastest safe value)
 MAX_CHANGES = 10                     # MORE than this many changes by one person pauses all backups
@@ -3019,11 +3201,6 @@ ID_FILE = DATA_DIR / "identity.json"
 
 def brand_name() -> str:
     return f"MAS VPS | Backuper V{VERSION}"
-
-
-def allowed_names() -> set[str]:
-    """The only two names the database server may have."""
-    return {BRAND_SUB, brand_name()}
 
 
 def main_name() -> str:
@@ -3107,7 +3284,7 @@ async def post_warning(bot, embed: discord.Embed) -> None:
 
 
 class Identity:
-    """Gives the database server its name + logo, and guards them: checked every 5 s, put back when changed."""
+    """Gives the database server its name + logo, and guards them: checked every 10 s, put back when changed."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -3150,7 +3327,7 @@ class Identity:
         return None
 
     async def cycle(self) -> None:
-        """Bot added / bot started: name -> (5 s) 'Sub To ItzMASGaming' -> (5 s) name again, and the logo."""
+        """Bot added / bot started: name -> (5 s) 'Sub to ItzMASGaming' -> (5 s) name again, and the logo."""
         g = self.guild
         if g is None or self.cycling:
             return
@@ -3231,7 +3408,7 @@ class Identity:
     async def watch(self) -> None:
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
-            await asyncio.sleep(CHECK_SECONDS)
+            await asyncio.sleep(10)
             try:
                 await self.check()
             except Exception as e:  # noqa: BLE001
@@ -3239,7 +3416,7 @@ class Identity:
 
     def _bad(self, g, st) -> tuple[bool, bool]:
         icon = g.icon.key if g.icon else None
-        return g.name not in allowed_names(), bool(st.get("icon_managed")) and icon != st.get("icon")
+        return g.name != self.expected_name, bool(st.get("icon_managed")) and icon != st.get("icon")
 
     async def check(self) -> None:
         g = self.guild
@@ -3267,7 +3444,7 @@ class Identity:
         save_ident(st)
         lines = []
         if name_bad:
-            lines.append(f"**Name:** `{g.name}` (it must be `{brand_name()}` or `{BRAND_SUB}`)")
+            lines.append(f"**Name:** `{g.name}` (it must be `{self.expected_name}`)")
         if icon_bad:
             lines.append("**Logo:** it was changed")
         fixed = False
@@ -3275,7 +3452,7 @@ class Identity:
         try:
             kw: dict = {}
             if name_bad:
-                kw["name"] = brand_name()
+                kw["name"] = self.expected_name
             if icon_bad:
                 logo = await self.fetch_logo()
                 if logo:
@@ -3401,6 +3578,7 @@ async def cmd_admin_add(interaction: discord.Interaction, user: str):
         ids.append(target.id)
     cfg["admin_ids"] = ids
     save_cfg(cfg)
+    request_self_backup(bot)
     log.info("admin added: %s (%s) by %s", target, target.id, interaction.user.id)
     await chan.send(embed=ui("ok", "Admin added", f"<@{target.id}> (`{target.id}`) can now use this bot.",
                              [("👥 Admins now", str(len(ids)), True)]), allowed_mentions=NO_MENTIONS)
@@ -3457,8 +3635,9 @@ async def notify_full(guild: discord.Guild, channel, vps_n: int, stats: dict | N
     bot = BOT
     saved = f" {stats['ok']:,} files were saved before it stopped." if stats and stats.get("ok") else ""
     e = ui("error", "Database servers are full - add another one",
-           f"The backup of **vps-{vps_n}** stopped because every database server reached Discord's limit of "
-           f"**{CHANNEL_LIMIT} channels per server**.{saved} Nothing that was already saved is lost.",
+           f"The backup of **vps-{vps_n}** stopped because every database server is full: Discord's limit of "
+           f"**{CHANNEL_LIMIT} channels per server** or the **{max_vps()} VPS per server** limit was reached.{saved} "
+           f"Nothing that was already saved is lost.",
            [("➕ What to do", "**1.** Create a new empty Discord server that **you own**.\n"
                              "**2.** Copy its **server ID** (Developer Mode → right-click the server icon → Copy Server ID).\n"
                              "**3.** Run `/addserver server_id:<that ID>`. If I'm not in it yet, I send you an invite link."),
@@ -3500,8 +3679,10 @@ def server_embed(bot, k: int, gid: int) -> discord.Embed:
         e.add_field(name="⚠️ Status", value="The bot is not in this server right now.", inline=False)
     else:
         used = len(g.channels)
-        holds = sorted({c.name for c in g.categories if re.fullmatch(r"vps-\d+(-\d+)?", c.name)})
+        have = guild_vps(g)
+        holds = [f"vps-{n}" for n in sorted(have)]
         e.add_field(name="📛 Name", value=g.name[:100], inline=True)
+        e.add_field(name="🖥️ VPS", value=f"{len(have)}/{max_vps()}" + (" 🔴 full" if len(have) >= max_vps() else ""), inline=True)
         e.add_field(name="📂 Channels", value=f"{used}/{CHANNEL_LIMIT}" + (" 🔴 full" if used >= CHANNEL_LIMIT - CHANNEL_RESERVE else ""), inline=True)
         e.add_field(name="👥 Members", value=str(g.member_count), inline=True)
         e.add_field(name="💾 Holds", value=(", ".join(holds)[:900] or "nothing yet"), inline=False)
@@ -3614,7 +3795,7 @@ async def cmd_addserver(interaction: discord.Interaction, server_id: str):
         "warn", f"Use {g.name} as a database server?",
         f"This **deletes every channel** and **kicks every member** (except you and me) of **{g.name}**, makes it private and uses it to store backups.",
         [("⚠️ This cannot be undone", "Anything in that server is gone for good."),
-         ("📂 Why", f"Discord allows {CHANNEL_LIMIT} channels per server. Backups continue in the new server when the others are full.")]), view=view)
+         ("📂 Why", f"One server holds up to {max_vps()} VPS (and Discord allows {CHANNEL_LIMIT} channels). Backups continue in the new server when the others are full.")]), view=view)
     await view.wait()
     if not view.ok:
         return
@@ -3630,6 +3811,7 @@ async def cmd_addserver(interaction: discord.Interaction, server_id: str):
     cfg["pending_servers"] = [x for x in cfg.get("pending_servers", []) if int(x) != gid]
     save_cfg(cfg)
     await update_servers_channel(bot)
+    request_self_backup(bot)
     await chan.send(embed=ui(
         "ok", f"Database #{k} is ready", f"**{g.name}** is now a private database server (`{gid}`).",
         [("📂 Listed in", f"#{SERVERS_CH} (main server)" if main_gid() else "the bot config", True),
@@ -3681,6 +3863,141 @@ async def sync_main(bot, status: bool = True) -> None:
     await asyncio.gather(*(one(n) for n in chans))
 
 
+# ---- main server: the bot backs up ITSELF (always Ultra form: one channel, every item tagged c<mas<...<)
+_SELF_SECRET = ("pass", "secret", "token", "key", "pwd")
+_SELF_MSG_RE = re.compile(r"^(c<[^\n]*?<)  • sha ([0-9a-f]{12})")
+
+
+def redact(obj):
+    """Copy of obj with every password/secret/token/key value replaced - those never go to Discord."""
+    if isinstance(obj, dict):
+        return {k: ("***not stored***" if v and any(w in str(k).lower() for w in _SELF_SECRET) else redact(v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact(x) for x in obj]
+    return obj
+
+
+def self_items(bot) -> list[tuple[str, bytes]]:
+    """Everything the bot knows about itself, as (Ultra label, json bytes):
+         c<mas<overview<     how many servers / VPS, which database servers, mode, limits
+         c<mas<config<       the bot settings (the Discord token and passwords are NOT stored)
+         c<mas<vps<vps-N<    one item per VPS: how it is reached + how much of it is backed up"""
+    def dump(o) -> bytes:
+        return json.dumps(o, indent=2, sort_keys=True, ensure_ascii=False).encode()
+
+    cfg, dg = load_cfg(), bot.get_guild(bot.gid)
+    nums = vps_numbers()
+    servers = []
+    for k, gid in enumerate(db_guild_ids(), 1):
+        g = bot.get_guild(gid)
+        servers.append({"n": k, "id": gid, "role": "primary" if k == 1 else "extra",
+                        "name": g.name if g else None, "vps_stored": len(guild_vps(g)) if g else None})
+    overview = {
+        "bot_version": VERSION,
+        "ultra_storage": ultra_on(cfg),
+        "main_server_id": main_gid() or None,
+        "database_servers": servers,
+        "totals": {"servers_in_use": server_total(), "database_servers": len(servers), "vps": len(nums),
+                   "admins": len(cfg.get("admin_ids", [])), "max_vps_per_server": max_vps(cfg), "max_servers": MAX_SERVERS},
+        "vps_numbers": nums,
+    }
+    items = [(ultra_label("/mas/overview"), dump(overview)), (ultra_label("/mas/config"), dump(redact(cfg)))]
+    for n in nums:
+        try:
+            v = redact(load_vps(n))
+        except Exception as e:  # noqa: BLE001
+            log.warning("self-backup: cannot read vps%d: %s", n, e)
+            continue
+        if v.get("upterm"):
+            v["user"] = "***not stored***"             # the Upterm session id is a credential too
+        try:
+            t = backup_totals(dg, n) if dg is not None else {}
+            v["_backup"] = {"files": t.get("files", 0), "bytes": t.get("bytes", 0)}
+        except Exception:  # noqa: BLE001
+            pass
+        items.append((ultra_label(f"/mas/vps/vps-{n}"), dump(v)))
+    return items
+
+
+async def ensure_self_channel(mg: discord.Guild) -> discord.TextChannel:
+    ch = discord.utils.get(mg.text_channels, name=SELF_CH)
+    if ch is not None:
+        return ch
+    ow = {mg.default_role: discord.PermissionOverwrite(view_channel=False),
+          mg.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, attach_files=True,
+                                             read_message_history=True, manage_messages=True)}
+    owner = mg.get_member(mg.owner_id)
+    if owner is not None:
+        ow[owner] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
+    return await mg.create_text_channel(
+        SELF_CH, overwrites=ow,
+        topic=f"The bot's own data (servers, VPS list, settings) in Ultra form: c<mas<...<. Private. Passwords/tokens are never stored. {WARNING}")
+
+
+async def self_sync(ch, me_id: int, items, cache: dict) -> int:
+    """Send only what changed (same label + same hash = nothing to do), then delete the old copy. Returns changes."""
+    changed = 0
+    for label, data in items:
+        sha = hashlib.sha256(data).hexdigest()[:12]
+        old = cache.get(label)
+        if old is not None and old[1] == sha:
+            continue
+        name = label.rstrip(ULTRA_SEP).split(ULTRA_SEP)[-1] + ".json"
+        msg = await send_file(ch, data, name, content=f"{label}  • sha {sha}  • <t:{int(time.time())}:R>")
+        cache[label] = (msg, sha)
+        changed += 1
+        if old is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await old[0].delete()
+    return changed
+
+
+async def self_backup(bot, force: bool = False) -> int:
+    """Main server -> #bot-data-backup. Safe to call any time; unchanged data costs no messages."""
+    mg = bot.get_guild(main_gid()) if main_gid() else None
+    if mg is None:
+        return 0
+    async with bot.self_lock:
+        ch = await ensure_self_channel(mg)
+        if force or bot.self_cache is None or bot.self_cache_ch != ch.id:
+            cache: dict = {}
+            async for m in ch.history(limit=2000):             # newest first
+                if m.author.id != bot.user.id:
+                    continue
+                mt = _SELF_MSG_RE.match(m.content or "")
+                if not mt:
+                    continue
+                if mt.group(1) in cache:                       # an older copy left by an interrupted run
+                    with contextlib.suppress(discord.HTTPException):
+                        await m.delete()
+                else:
+                    cache[mt.group(1)] = (m, mt.group(2))
+            bot.self_cache, bot.self_cache_ch = cache, ch.id
+        n = await self_sync(ch, bot.user.id, self_items(bot), bot.self_cache)
+        if n:
+            log.info("self-backup: %d item(s) updated in #%s", n, SELF_CH)
+        return n
+
+
+def request_self_backup(bot=None) -> None:
+    """Ask for a self-backup soon (bursts of changes are merged into one run)."""
+    bot = bot or BOT
+    if bot is None or not main_gid() or getattr(bot, "self_pending", False):
+        return
+    bot.self_pending = True
+
+    async def _go() -> None:
+        await asyncio.sleep(5)
+        bot.self_pending = False
+        try:
+            await self_backup(bot)
+        except Exception as e:  # noqa: BLE001
+            log.warning("self-backup failed: %s", e)
+
+    asyncio.create_task(_go())
+
+
 async def reset_main(bot) -> bool:
     """/setup also resets the main server: every channel is deleted (except the command channel) and rebuilt."""
     mg = bot.get_guild(main_gid())
@@ -3701,6 +4018,10 @@ class Bot(discord.Client):
         global BOT
         BOT = self
         self.srv_cache: dict = {}
+        self.self_lock = asyncio.Lock()             # main-server self-backup
+        self.self_cache = None
+        self.self_cache_ch = 0
+        self.self_pending = False
         self.cfg = cfg
         self.tree = app_commands.CommandTree(self)
         self.lock = asyncio.Lock()
@@ -3710,8 +4031,8 @@ class Bot(discord.Client):
         self._started = False
 
     async def setup_hook(self):
-        cmds = (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_backup, cmd_copy, cmd_import,
-                cmd_focus, cmd_ulra, cmd_confirm, cmd_addserver, cmd_admin_add)
+        cmds = (cmd_setup, vps_group, cmd_nodes, cmd_info, cmd_sshx, cmd_access, cmd_ultra, cmd_backup, cmd_copy,
+                cmd_import, cmd_focus, cmd_confirm, cmd_addserver, cmd_admin_add)
         for gid in [self.gid] + ([self.mid] if self.mid else []):
             g = discord.Object(id=gid)
             for c in cmds:
@@ -3801,6 +4122,10 @@ class Bot(discord.Client):
                 await sync_main(self)
             except Exception as e:  # noqa: BLE001
                 log.warning("main server status update failed: %s", e)
+            try:
+                await self_backup(self)
+            except Exception as e:  # noqa: BLE001
+                log.warning("self-backup failed: %s", e)
             await asyncio.sleep(every)
 
     async def on_member_join(self, member: discord.Member):
@@ -3922,7 +4247,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["set-token", "migrate-token", "set-guild", "invite", "wipe",
                                     "add-local", "add-vps", "check", "inspect", "protect", "run",
-                                    "set-main-guild", "check-main"])
+                                    "set-main-guild", "check-main", "ultra"])
+    ap.add_argument("arg", nargs="?", default="status")
     args = ap.parse_args()
     setup_logging()
     cfg = load_cfg()
@@ -3945,6 +4271,17 @@ def main() -> int:
 
     if args.cmd == "migrate-token":
         print(migrate_token())
+        return 0
+
+    if args.cmd == "ultra":                      # no token needed: it only edits config.json
+        a = (args.arg or "status").lower()
+        if a not in ("on", "off", "toggle", "status"):
+            log.error("Use: ultra on | off | toggle | status")
+            return 1
+        if a != "status":
+            cfg["ultra"] = (not ultra_on(cfg)) if a == "toggle" else a == "on"
+            save_cfg(cfg)
+        print("on" if ultra_on(cfg) else "off")
         return 0
 
     if args.cmd == "set-guild":
@@ -4045,7 +4382,9 @@ FALLBACK_URL="${MAS_FALLBACK_URL:-https://raw.githubusercontent.com/$MAS_REPO/ma
 fetch_latest() {   # fetch_latest <output-file>
   local u
   for u in "$SELF_URL" "$FALLBACK_URL"; do
-    curl -fsSL --max-time 20 "$u?$(date +%s)" -o "$1" 2>/dev/null && [[ -s "$1" ]] && return 0
+    curl -fsSL --max-time 20 "$u?$(date +%s)" -o "$1" 2>/dev/null && [[ -s "$1" ]] || continue
+    sed -i 's/\r$//' "$1"   # tolerate Windows (CRLF) line endings on the hosted copy
+    return 0
   done
   return 1
 }
@@ -4210,16 +4549,22 @@ stop_bot() {
 
 bot_status() {
   header "Bot Status"
+  mm_status
   if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q mas-backup-bot; then
-    systemctl --no-pager status mas-backup-bot | head -n 12
+    systemctl --no-pager status mas-backup-bot | head -n 12 | sed 's/^/  /'
   elif [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     ok "Running (pid $(cat "$PIDFILE"))"
   else
     warn "Bot is not running."
   fi
   echo
-  echo "  ${MM_SUB}Last log lines:${RST}"
-  [[ -f "$LOG" ]] && tail -n 15 "$LOG" | sed 's/^/    /'
+  mm_div
+  echo "  ${MM_TITLE}Last log lines${RST}"
+  if [[ -f "$LOG" ]]; then
+    tail -n 15 "$LOG" | cut -c1-110 | sed "s/^/    ${MM_SUB}/; s/\$/${RST}/"
+  else
+    echo "    ${MM_SUB}(no log yet)${RST}"
+  fi
   pause
 }
 
@@ -4271,6 +4616,7 @@ setup_discord_bot() {
        echo "  In Discord (#talk-cmds-here):"
        echo "    /info-vps number:<n>    full VPS details (status, CPU, RAM, disk, backup coverage)"
        echo "    /sshx vps:<n>           private sshx web-terminal link (only you see it)"
+       echo "    /ultra on|off           Ultra Storage: one channel per VPS instead of one per folder"
        echo "    /access vps:<n>         private terminal inside Discord"
        echo "    /copybackup vps:<a> to:<b>   paste the backup of VPS a into VPS b"
        echo "    /importbackup vps:<n>   restore that VPS from the backup"
@@ -4433,6 +4779,8 @@ setup_main_server() {
   echo "    ${MM_NUM}•${RST} a ${BOLD}VPS${RST} category with one channel per VPS showing its live status"
   echo "    ${MM_NUM}•${RST} run every command from there, it controls the database (backup) server"
   echo "    ${MM_NUM}•${RST} a ${BOLD}warnings${RST} channel (the database server has one too)"
+  echo "    ${MM_NUM}•${RST} ${BOLD}bot-data-backup${RST}: the bot backs up ${BOLD}itself${RST} here (servers, VPS list, settings)"
+  echo "      in Ultra form ${MM_ORG}c<mas<vps<vps-1<${RST} - passwords and tokens are never stored"
   echo
   echo "  Invite the bot to the ${BOLD}main server${RST} with this link:"
   echo
@@ -4460,10 +4808,55 @@ setup_main_server() {
   pause
 }
 
+# ---------------------------------------------------------------- Ultra Storage mode
+ultra_menu() {
+  while true; do
+    header "Ultra Storage"
+    mm_status
+    echo "  ${BOLD}What it does${RST}"
+    echo "    ${MM_NUM}•${RST} ${BOLD}Off${RST}  one Discord channel for ${BOLD}every folder${RST} (up to 2 levels deep)"
+    echo "    ${MM_NUM}•${RST} ${BOLD}On${RST}   ${BOLD}one channel per VPS${RST} (#ultra-vps-N), no matter how many folders"
+    echo "    ${MM_NUM}•${RST} Up to ${BOLD}250 VPS per Discord server${RST}; the next VPS goes to the next database server"
+    echo
+    echo "  Each upload is tagged with its folder, like this:"
+    echo "    ${MM_ORG}c<user<data<%folder-name%<${RST}"
+    echo
+    echo "  ${BOLD}Backup${RST}  files go into the one channel with that tag"
+    echo "  ${BOLD}Import${RST}  restores the same way - a folder that is missing on the"
+    echo "          VPS is created first, then the files are put in it"
+    echo
+    mm_div
+    if ultra_is_on; then
+      mm_item 1 "🔕" "Turn Ultra Storage OFF"
+    else
+      mm_item 1 "🧊" "Turn Ultra Storage ON"
+    fi
+    mm_item 0 "↩" "Back" "" "$MM_BOX"
+    mm_prompt
+    read -r choice
+    case "$choice" in
+      1) ensure_env || { pause; continue; }
+         if ultra_is_on; then
+           "$PY" "$BOT" ultra off >/dev/null && ok "Ultra Storage is now OFF (channel per folder)."
+         else
+           "$PY" "$BOT" ultra on >/dev/null && ok "Ultra Storage is now ON (one channel per VPS)."
+         fi
+         echo "  ${MM_SUB}Applies to the next /backup - no restart needed.${RST}"
+         if bot_running; then
+           echo "  ${MM_SUB}First time? Use Auto Backup -> Update bot so the ${RST}${BOLD}/ultra${RST}${MM_SUB} command shows up in Discord.${RST}"
+         fi
+         pause ;;
+      0) return ;;
+      *) err "Invalid option"; sleep 1 ;;
+    esac
+  done
+}
+
 # ---------------------------------------------------------------- Auto Backup menu
 auto_backup_menu() {
   while true; do
     header "Auto Backup"
+    mm_status
     mm_item 1 "🤖" "Setup Discord bot"
     mm_item 2 "📥" "Setup LVIB (Load VPS into bot)"
     mm_item 3 "📜" "Bot status / logs"
@@ -4471,6 +4864,11 @@ auto_backup_menu() {
     mm_item 5 "🚀" "Start bot"
     mm_item 6 "🛑" "Stop bot"
     mm_item 7 "🔄" "Update bot"
+    if ultra_is_on; then
+      mm_item 8 "🧊" "Ultra Storage mode  ${GRN}${BOLD}[ON]${RST}"
+    else
+      mm_item 8 "🧊" "Ultra Storage mode  ${MM_SUB}[off]${RST}"
+    fi
     mm_item 0 "↩" "Back" "" "$MM_BOX"
     mm_prompt
     read -r choice
@@ -4482,6 +4880,7 @@ auto_backup_menu() {
       5) start_bot_menu ;;
       6) stop_bot ;;
       7) update_bot ;;
+      8) ultra_menu ;;
       0) return ;;
       *) err "Invalid option"; sleep 1 ;;
     esac
@@ -4532,6 +4931,7 @@ show_version() {
 # ---------------------------------------------------------------- Main menu
 while true; do
   main_header
+  mm_status
   mm_item 1 "💾" "Auto Backup"
   mm_item 2 "🚧" "Coming soon"
   mm_item 3 "🔖" "Version"
