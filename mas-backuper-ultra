@@ -2,7 +2,7 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.8.0"
+MAS_VERSION="6.9.0"
 MAS_UPDATED="2026-11-02 14:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
@@ -131,7 +131,7 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.8.0"
+VERSION = "6.9.0"
 UPDATED = "2026-11-02 14:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
@@ -3691,13 +3691,61 @@ def server_embed(bot, k: int, gid: int) -> discord.Embed:
     return e
 
 
+DB_CYCLING: set = set()                     # server ids whose name is being animated right now (refresh must not touch them)
+
+
+async def cycle_db_server(bot, k: int, gid: int) -> None:
+    """Same animation as the primary server: 'MAS Database #k | Vx' -> 'Sub to ItzMASGaming' -> back."""
+    g = bot.get_guild(gid)
+    if g is None or gid in DB_CYCLING:
+        return
+    DB_CYCLING.add(gid)
+    name = f"MAS Database #{k} | V{VERSION}"
+    try:
+        for nm in (name, BRAND_SUB, name):
+            gg = bot.get_guild(gid) or g
+            if gg.name != nm:
+                await gg.edit(name=nm, reason="MAS database server name cycle")
+            if nm != name or gg.name != name:
+                await asyncio.sleep(5)
+        log.info("database server #%d name cycle done", k)
+    except Exception as e:  # noqa: BLE001
+        log.warning("name cycle of database server #%d failed: %s", k, e)
+    finally:
+        DB_CYCLING.discard(gid)
+
+
+async def cycle_db_servers(bot) -> None:
+    await asyncio.gather(*(cycle_db_server(bot, k, gid) for k, gid in enumerate(db_guild_ids(), 1) if k > 1))
+
+
+async def db_name_loop(bot) -> None:
+    """Repeats the name cycle on every extra database server. cfg 'name_repeat_minutes' (default 30, 0 = never).
+    Discord limits server edits, so keep it at 10 minutes or more."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        mins = load_cfg().get("name_repeat_minutes", 30)
+        try:
+            mins = float(mins)
+        except (TypeError, ValueError):
+            mins = 30.0
+        if mins <= 0:
+            await asyncio.sleep(60)
+            continue
+        await asyncio.sleep(max(10.0, mins) * 60)
+        try:
+            await cycle_db_servers(bot)
+        except Exception as e:  # noqa: BLE001
+            log.warning("database name loop failed: %s", e)
+
+
 async def refresh_db_servers(bot) -> None:
     """Keep every EXTRA database server (added with /addserver) up to date: name 'MAS Database #k | V<version>' + logo."""
     for k, gid in enumerate(db_guild_ids(), 1):
         if k == 1:
             continue                                     # the primary server is handled by Identity
         g = bot.get_guild(gid)
-        if g is None:
+        if g is None or gid in DB_CYCLING:
             continue
         kw: dict = {}
         name = f"MAS Database #{k} | V{VERSION}"
@@ -3844,6 +3892,7 @@ async def cmd_addserver(interaction: discord.Interaction, server_id: str):
     await update_servers_channel(bot)
     try:
         await refresh_db_servers(bot)
+        asyncio.create_task(cycle_db_server(bot, k, gid))
         await self_backup(bot, force=True)               # write the new server into #bot-data-backup right away
     except Exception as e:  # noqa: BLE001
         log.warning("self-backup after /addserver failed: %s", e)
@@ -4119,6 +4168,8 @@ class Bot(discord.Client):
         if not self._started:                       # on_ready can fire again after a reconnect
             self._started = True
             asyncio.create_task(self.ident.watch())
+            asyncio.create_task(cycle_db_servers(self))
+            asyncio.create_task(db_name_loop(self))
             asyncio.create_task(self.presence_loop())
             asyncio.create_task(self.status_loop())
             if guild is not None:
