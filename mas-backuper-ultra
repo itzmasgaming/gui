@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
+#
+# --- CRLF self-heal: if this file was saved with Windows line endings, clean it and re-run ---
+# (the "if" and "unset" lines end with a comment so a stray \r can never break them)
+_mas_crlf=ok
+if [ "$_mas_crlf" != ok ] && [ -z "$MAS_CLEAN" ]; then export MAS_CLEAN=1; if [ -f "$0" ]; then exec bash <(tr -d '\r' < "$0") "$@"; else exec bash <(curl -fsSL "https://itzmasgaming.github.io/gui/mas-backuper-ultra?$(date +%s)" | tr -d '\r') "$@"; fi; fi # 
+unset _mas_crlf # 
 
 MAS_VERSION="6.5.0"
 MAS_UPDATED="2026-11-01 22:00 UTC"
