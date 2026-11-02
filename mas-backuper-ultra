@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.9.0"
-MAS_UPDATED="2026-11-02 14:00 UTC"
+MAS_VERSION="7.0.0"
+MAS_UPDATED="2026-11-02 15:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
 
@@ -100,6 +100,8 @@ CLI (used by the menu):
   protect        make a server that has backups private without deleting anything
   ultra [on|off|toggle|status]   Ultra Storage mode: ONE channel per VPS, files tagged c<path<to<folder<
   (main server) #bot-data-backup holds the bot's own data in Ultra form: c<mas<overview<  c<mas<config<  c<mas<vps<vps-N<
+  (startup) no db.bot.mas yet -> look in the main server's #bot-data-backup, load what is there, then write db.bot.mas
+  (runtime) auto-update: the bot checks the hosted script and updates + restarts itself when a newer version is out
   run            start the bot (/setup /vps add /vps list /nodes /info-vps /sshx /access /ultra /backup /copybackup /importbackup /focusbackup)
 """
 from __future__ import annotations
@@ -124,6 +126,7 @@ import stat
 import sys
 import tarfile
 import time
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
@@ -131,13 +134,18 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.9.0"
-UPDATED = "2026-11-02 14:00 UTC"
+VERSION = "7.0.0"
+UPDATED = "2026-11-02 15:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
 CONFIG = DATA_DIR / "config.json"
 ENV_FILE = DATA_DIR / ".env"
 LOGFILE = DATA_DIR / "bot.log"
+DB_FILE = DATA_DIR / "db.bot.mas"      # exists == "this bot's own data is loaded / in sync with #bot-data-backup"
+BOT_FILE = Path(__file__).resolve()    # this very script (replaced by the auto-updater)
+SELF_URL = os.environ.get("MAS_SELF_URL", "https://itzmasgaming.github.io/gui/mas-backuper-ultra")
+FALLBACK_URL = os.environ.get("MAS_FALLBACK_URL", "https://raw.githubusercontent.com/itzmasgaming/gui/main/mas-backuper-ultra")
+UPDATE_MINUTES = 30                    # how often the bot looks for a new version (cfg: update_minutes, min 5; cfg auto_update=false turns it off)
 
 WARNING = "# DONT DELETE OR DATA WILL LOSTED"
 SEP = "｜"                      # full-width bar, used for spaces and part names
@@ -4057,6 +4065,8 @@ async def self_backup(bot, force: bool = False) -> int:
     mg = bot.get_guild(main_gid()) if main_gid() else None
     if mg is None:
         return 0
+    if not DB_FILE.exists():            # db_bootstrap() has not decided yet: a fresh bot must never overwrite the saved data
+        return 0
     async with bot.self_lock:
         ch = await ensure_self_channel(mg)
         if force or bot.self_cache is None or bot.self_cache_ch != ch.id:
@@ -4108,6 +4118,215 @@ async def reset_main(bot) -> bool:
     return True
 
 
+# ---- db.bot.mas: first start on a machine -> pull the bot's own data back from the main server
+REDACTED = "***not stored***"
+BIO_NEED_MAIN = ("⚠ Main server not set yet. Add me to your MAIN server (invite link: menu > Auto Backup > 4 Main server), "
+                 "then I load my saved data from #bot-data-backup by myself.")
+BIO_NEED_INVITE = "⚠ I'm not in the main server yet. Add me with the invite link (menu > Auto Backup > 4), I will load my data right after."
+BIO_OK = "MAS Backup System | ItzMASGaming"
+
+
+def write_db_file(info: dict) -> None:
+    write_private(DB_FILE, {"bot_version": VERSION, "written": int(time.time()), **info})
+
+
+def strip_redacted(o):
+    """Drop every '***not stored***' value (passwords/tokens were never saved) so it can't overwrite a real value."""
+    if isinstance(o, dict):
+        return {k: strip_redacted(v) for k, v in o.items() if v != REDACTED}
+    if isinstance(o, list):
+        return [strip_redacted(x) for x in o if x != REDACTED]
+    return o
+
+
+async def set_bio(bot, text: str) -> None:
+    """The bot's 'About Me' (bio) = its application description. Only sent when the text changes."""
+    if getattr(bot, "_bio", None) == text:
+        return
+    try:
+        await bot.http.request(discord.http.Route("PATCH", "/applications/@me"), json={"description": text[:400]})
+        bot._bio = text
+        log.info("bot bio updated")
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not change the bot bio: %s", e)
+
+
+async def read_self_data(ch, me_id: int) -> dict:
+    """{ultra label: bytes} for the newest copy of every item the bot saved in #bot-data-backup."""
+    found: dict = {}
+    async for m in ch.history(limit=2000):                    # newest first
+        if m.author.id != me_id or not m.attachments:
+            continue
+        mt = _SELF_MSG_RE.match(m.content or "")
+        if not mt or mt.group(1) in found:
+            continue
+        found[mt.group(1)] = await m.attachments[0].read()    # an error here aborts the load (retried later), never a half restore
+    return found
+
+
+def restore_self_data(found: dict) -> dict:
+    """Load the saved items into this machine. What already exists here always wins; only missing things are filled in."""
+    res = {"config_keys": 0, "vps": [], "need_credentials": []}
+    lab = ultra_label("/mas/config")
+    if lab in found:
+        saved = strip_redacted(json.loads(found[lab]))
+        cfg = load_cfg()
+        for k, v in saved.items():
+            if k not in cfg:
+                cfg[k] = v
+                res["config_keys"] += 1
+        if res["config_keys"]:
+            save_cfg(cfg)
+    vps_re = re.compile("^" + re.escape(ultra_label("/mas/vps/vps-")[:-1]) + r"(\d+)<$")
+    have_local = any(load_vps(n).get("local") for n in vps_numbers())
+    for label in sorted(found):
+        mt = vps_re.match(label)
+        if not mt:
+            continue
+        n = int(mt.group(1))
+        if vps_file(n).exists():
+            continue
+        v = strip_redacted(json.loads(found[label]))
+        v.pop("_backup", None)
+        if v.get("local"):
+            if have_local:                                   # this machine is already added under another number
+                continue
+            have_local = True
+        elif not (v.get("password") or v.get("upterm")):
+            v["needs_credentials"] = True                    # passwords are never saved: add the VPS again with /vps add
+            res["need_credentials"].append(n)
+        save_vps(n, v)
+        res["vps"].append(n)
+    return res
+
+
+async def db_bootstrap_once(bot) -> bool:
+    """One try. True = finished (db.bot.mas written). False = waiting for the main server / the bot invite."""
+    mid = main_gid()
+    if not mid:
+        await set_bio(bot, BIO_NEED_MAIN)
+        return False
+    mg = bot.get_guild(mid)
+    if mg is None:
+        await set_bio(bot, BIO_NEED_INVITE)
+        return False
+    ch = discord.utils.get(mg.text_channels, name=SELF_CH)
+    found = await read_self_data(ch, bot.user.id) if ch is not None else {}
+    if found:
+        res = restore_self_data(found)
+        bot.cfg.clear()
+        bot.cfg.update(load_cfg())
+        write_db_file({"source": "main-server", "main_server_id": mid, "channel_id": ch.id, "items_found": len(found),
+                       "config_keys_loaded": res["config_keys"], "vps_loaded": res["vps"]})
+        log.info("db.bot.mas created: loaded %d item(s) from #%s (%d setting(s), VPS %s)",
+                 len(found), SELF_CH, res["config_keys"], res["vps"] or "none new")
+        if res["need_credentials"]:
+            log.warning("vps%s came back without a password (never stored): add them again with /vps add",
+                        ", vps".join(str(x) for x in res["need_credentials"]))
+        with contextlib.suppress(Exception):
+            await load_registry(bot)
+        if float(bot.cfg.get("interval_hours", 0)) > 0 and not getattr(bot, "_auto_started", False):
+            bot._auto_started = True
+            asyncio.create_task(bot.auto_loop())
+    else:
+        write_db_file({"source": "new", "main_server_id": mid})        # nothing saved yet: #bot-data-backup gets filled by the self-backup
+        log.info("db.bot.mas created: no saved data in the main server yet, starting fresh")
+    await set_bio(bot, BIO_OK)
+    request_self_backup(bot)
+    return True
+
+
+async def db_bootstrap(bot) -> None:
+    """Start-up check. db.bot.mas there -> nothing to do. Otherwise wait for the main server and load #bot-data-backup."""
+    await bot.wait_until_ready()
+    while not bot.is_closed() and not DB_FILE.exists():
+        try:
+            if await db_bootstrap_once(bot):
+                return
+        except Exception as e:  # noqa: BLE001
+            log.warning("loading #%s failed, will retry: %s", SELF_CH, e)
+        await asyncio.sleep(30)
+
+
+# ---- auto-update: the bot watches the hosted script (the same one `bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)` runs)
+def _ver_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4]) or (0,)
+
+
+def _download_script() -> str | None:
+    for u in (SELF_URL, FALLBACK_URL):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{u}?{int(time.time())}", headers={"User-Agent": "mas-bot"}), timeout=20) as r:
+                text = r.read().decode("utf-8", "replace").replace("\r\n", "\n")
+            if text.strip():
+                return text
+        except Exception as e:  # noqa: BLE001
+            log.debug("update check: %s failed (%s)", u, e)
+    return None
+
+
+def _embedded_bot(script: str) -> str | None:
+    """The bot code inside the hosted script (same extraction the menu's 'Update bot' uses)."""
+    out, on = [], False
+    for ln in script.split("\n"):
+        if not on:
+            on = bool(re.fullmatch(r"cat > \"\$BOT\" <<.MAS_BOT_EOF.", ln))
+            continue
+        if ln == "MAS_BOT_EOF":
+            break
+        out.append(ln)
+    return "\n".join(out) + "\n" if out else None
+
+
+def _check_update() -> tuple[str, str] | None:
+    """(new version, new code) when the hosted bot is newer than the running one and its code is valid, else None."""
+    script = _download_script()
+    code = _embedded_bot(script) if script else None
+    if not code:
+        return None
+    mt = re.search(r'^VERSION = "([^"]+)"', code, re.M)
+    if not mt:
+        return None
+    remote, local = _ver_tuple(mt.group(1)), _ver_tuple(VERSION)
+    try:
+        same = BOT_FILE.read_text(encoding="utf-8") == code
+    except OSError:
+        same = False
+    if remote < local or same:
+        return None
+    try:
+        compile(code, "mas_backup_bot.py", "exec")
+    except SyntaxError as e:
+        log.warning("update found (v%s) but its code is broken (%s), keeping v%s", mt.group(1), e, VERSION)
+        return None
+    return mt.group(1), code
+
+
+async def update_loop(bot) -> None:
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        cfg = load_cfg()
+        if cfg.get("auto_update", True):
+            try:
+                found = await asyncio.to_thread(_check_update)
+                if found:
+                    ver, code = found
+                    log.info("update available: v%s (running v%s) - waiting for running jobs, then restarting", ver, VERSION)
+                    async with bot.lock:                          # never restart in the middle of a backup/import
+                        with contextlib.suppress(OSError):
+                            shutil.copyfile(BOT_FILE, str(BOT_FILE) + ".bak")
+                        tmp = BOT_FILE.with_name(BOT_FILE.name + ".new")
+                        tmp.write_text(code, encoding="utf-8")
+                        os.replace(tmp, BOT_FILE)
+                        log.info("bot updated to v%s - restarting now", ver)
+                        with contextlib.suppress(Exception):
+                            await bot.close()
+                        os.execv(sys.executable, [sys.executable, str(BOT_FILE), "run"])   # same PID: systemd / pidfile keep working
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto-update check failed: %s", e)
+        await asyncio.sleep(max(5, int(cfg.get("update_minutes", UPDATE_MINUTES))) * 60)
+
+
 # ------------------------------------------------------------------ bot
 class Bot(discord.Client):
     def __init__(self, cfg: dict):
@@ -4140,7 +4359,9 @@ class Bot(discord.Client):
                 await self.tree.sync(guild=g)
             except discord.HTTPException as e:
                 log.warning("could not add the commands to server %s (is the bot in it?): %s", gid, e)
+        self._auto_started = False
         if float(self.cfg.get("interval_hours", 0)) > 0:
+            self._auto_started = True
             asyncio.create_task(self.auto_loop())
 
     async def on_ready(self):
@@ -4167,6 +4388,8 @@ class Bot(discord.Client):
                 await g.leave()
         if not self._started:                       # on_ready can fire again after a reconnect
             self._started = True
+            asyncio.create_task(db_bootstrap(self))             # db.bot.mas missing? load #bot-data-backup from the main server
+            asyncio.create_task(update_loop(self))              # auto-update from the hosted script
             asyncio.create_task(self.ident.watch())
             asyncio.create_task(cycle_db_servers(self))
             asyncio.create_task(db_name_loop(self))
