@@ -2,7 +2,7 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="6.7.0"
+MAS_VERSION="6.8.0"
 MAS_UPDATED="2026-11-02 14:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
@@ -131,7 +131,7 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "6.7.0"
+VERSION = "6.8.0"
 UPDATED = "2026-11-02 14:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
@@ -3691,6 +3691,37 @@ def server_embed(bot, k: int, gid: int) -> discord.Embed:
     return e
 
 
+async def refresh_db_servers(bot) -> None:
+    """Keep every EXTRA database server (added with /addserver) up to date: name 'MAS Database #k | V<version>' + logo."""
+    for k, gid in enumerate(db_guild_ids(), 1):
+        if k == 1:
+            continue                                     # the primary server is handled by Identity
+        g = bot.get_guild(gid)
+        if g is None:
+            continue
+        kw: dict = {}
+        name = f"MAS Database #{k} | V{VERSION}"
+        if g.name != name:
+            kw["name"] = name
+        st = load_ident()
+        icons = st.setdefault("db_icons", {})
+        if g.icon is None or g.icon.key != icons.get(str(gid)):
+            logo = await bot.ident.fetch_logo()
+            if logo:
+                kw["icon"] = logo
+        if not kw:
+            continue
+        try:
+            ng = await g.edit(reason="MAS database server refresh", **kw)
+            if "icon" in kw:
+                st = load_ident()
+                st.setdefault("db_icons", {})[str(gid)] = ng.icon.key if ng and ng.icon else None
+                save_ident(st)
+            log.info("database server #%d refreshed: %s", k, name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not refresh database server #%d: %s", k, e)
+
+
 async def update_servers_channel(bot) -> None:
     mg = bot.get_guild(main_gid()) if main_gid() else None
     if mg is None:
@@ -3811,7 +3842,12 @@ async def cmd_addserver(interaction: discord.Interaction, server_id: str):
     cfg["pending_servers"] = [x for x in cfg.get("pending_servers", []) if int(x) != gid]
     save_cfg(cfg)
     await update_servers_channel(bot)
-    request_self_backup(bot)
+    try:
+        await refresh_db_servers(bot)
+        await self_backup(bot, force=True)               # write the new server into #bot-data-backup right away
+    except Exception as e:  # noqa: BLE001
+        log.warning("self-backup after /addserver failed: %s", e)
+        request_self_backup(bot)
     await chan.send(embed=ui(
         "ok", f"Database #{k} is ready", f"**{g.name}** is now a private database server (`{gid}`).",
         [("📂 Listed in", f"#{SERVERS_CH} (main server)" if main_gid() else "the bot config", True),
@@ -3903,6 +3939,15 @@ def self_items(bot) -> list[tuple[str, bytes]]:
         "vps_numbers": nums,
     }
     items = [(ultra_label("/mas/overview"), dump(overview)), (ultra_label("/mas/config"), dump(redact(cfg)))]
+    for s_ in servers:                                  # one item per database server (added with /addserver too)
+        g = bot.get_guild(s_["id"])
+        info = dict(s_)
+        info["in_server"] = g is not None
+        if g is not None:
+            have = sorted(guild_vps(g))
+            info.update({"channels": len(g.channels), "channel_limit": CHANNEL_LIMIT, "members": g.member_count,
+                         "vps_limit": max_vps(cfg), "full": len(have) >= max_vps(cfg), "holds": [f"vps-{n}" for n in have]})
+        items.append((ultra_label(f"/mas/servers/server-{s_['n']}"), dump(info)))
     for n in nums:
         try:
             v = redact(load_vps(n))
@@ -3950,6 +3995,11 @@ async def self_sync(ch, me_id: int, items, cache: dict) -> int:
         if old is not None:
             with contextlib.suppress(discord.HTTPException):
                 await old[0].delete()
+    live = {label for label, _ in items}
+    for label in [k for k in cache if k not in live]:   # a VPS/server that no longer exists: drop its old item
+        with contextlib.suppress(discord.HTTPException):
+            await cache.pop(label)[0].delete()
+        changed += 1
     return changed
 
 
@@ -4089,6 +4139,8 @@ class Bot(discord.Client):
                     log.warning("could not add the commands to the main server: %s", e)
                 await sync_main(self, status=False)
                 asyncio.create_task(self.ident.apply_main())
+            elif guild.id in extra_ids():
+                request_self_backup(self)
             elif guild.id in [int(x) for x in load_cfg().get("pending_servers", [])]:
                 dg = self.get_guild(self.gid)
                 owner = dg and (dg.get_member(dg.owner_id) or await dg.fetch_member(dg.owner_id))
@@ -4119,6 +4171,10 @@ class Bot(discord.Client):
         every = max(30, int(self.cfg.get("status_seconds", 120)))
         while not self.is_closed():
             try:
+                await refresh_db_servers(self)
+            except Exception as e:  # noqa: BLE001
+                log.warning("database server refresh failed: %s", e)
+            try:
                 await sync_main(self)
             except Exception as e:  # noqa: BLE001
                 log.warning("main server status update failed: %s", e)
@@ -4127,6 +4183,10 @@ class Bot(discord.Client):
             except Exception as e:  # noqa: BLE001
                 log.warning("self-backup failed: %s", e)
             await asyncio.sleep(every)
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        if guild.id in db_guild_ids():
+            request_self_backup(self)
 
     async def on_member_join(self, member: discord.Member):
         if member.guild.id not in db_guild_ids() or member.id in allowed_ids(member.guild):
