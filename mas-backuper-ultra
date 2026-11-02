@@ -3009,7 +3009,8 @@ for _cmd, _names in ((cmd_sshx, ("vps",)), (cmd_access, ("vps",)), (cmd_copy, ("
 WARN = "warnings"                    # channel that gets the warnings (in the main AND the database server)
 VPS_CAT = "VPS"                      # category in the main server: one live-status channel per VPS
 LOGO_URL = "https://raw.githubusercontent.com/itzmasgaming/gui/main/dc-database-logo.png"
-BRAND_SUB = "Sub to ItzMASGaming"
+BRAND_SUB = "Sub To ItzMASGaming"
+CHECK_SECONDS = 5                    # how often the database server name + logo (dp) are checked
 CONFIRM_ID = 1352328694965735635     # may always run /confirm
 PRESENCE_SECONDS = 4                 # bot status rotation (Discord allows ~5 status changes per 20 s, so 4 is the fastest safe value)
 MAX_CHANGES = 10                     # MORE than this many changes by one person pauses all backups
@@ -3018,6 +3019,11 @@ ID_FILE = DATA_DIR / "identity.json"
 
 def brand_name() -> str:
     return f"MAS VPS | Backuper V{VERSION}"
+
+
+def allowed_names() -> set[str]:
+    """The only two names the database server may have."""
+    return {BRAND_SUB, brand_name()}
 
 
 def main_name() -> str:
@@ -3101,7 +3107,7 @@ async def post_warning(bot, embed: discord.Embed) -> None:
 
 
 class Identity:
-    """Gives the database server its name + logo, and guards them: checked every 10 s, put back when changed."""
+    """Gives the database server its name + logo, and guards them: checked every 5 s, put back when changed."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -3144,7 +3150,7 @@ class Identity:
         return None
 
     async def cycle(self) -> None:
-        """Bot added / bot started: name -> (5 s) 'Sub to ItzMASGaming' -> (5 s) name again, and the logo."""
+        """Bot added / bot started: name -> (5 s) 'Sub To ItzMASGaming' -> (5 s) name again, and the logo."""
         g = self.guild
         if g is None or self.cycling:
             return
@@ -3225,7 +3231,7 @@ class Identity:
     async def watch(self) -> None:
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
-            await asyncio.sleep(10)
+            await asyncio.sleep(CHECK_SECONDS)
             try:
                 await self.check()
             except Exception as e:  # noqa: BLE001
@@ -3233,7 +3239,7 @@ class Identity:
 
     def _bad(self, g, st) -> tuple[bool, bool]:
         icon = g.icon.key if g.icon else None
-        return g.name != self.expected_name, bool(st.get("icon_managed")) and icon != st.get("icon")
+        return g.name not in allowed_names(), bool(st.get("icon_managed")) and icon != st.get("icon")
 
     async def check(self) -> None:
         g = self.guild
@@ -3261,7 +3267,7 @@ class Identity:
         save_ident(st)
         lines = []
         if name_bad:
-            lines.append(f"**Name:** `{g.name}` (it must be `{self.expected_name}`)")
+            lines.append(f"**Name:** `{g.name}` (it must be `{brand_name()}` or `{BRAND_SUB}`)")
         if icon_bad:
             lines.append("**Logo:** it was changed")
         fixed = False
@@ -3269,7 +3275,7 @@ class Identity:
         try:
             kw: dict = {}
             if name_bad:
-                kw["name"] = self.expected_name
+                kw["name"] = brand_name()
             if icon_bad:
                 logo = await self.fetch_logo()
                 if logo:
