@@ -2,8 +2,8 @@
 # MAS GUI v6.0 - single-file installer/menu (everything is inside this one file)
 # Run with:  bash <(curl -sL itzmasgaming.github.io/gui/mas-backuper-ultra)
 
-MAS_VERSION="7.0.0"
-MAS_UPDATED="2026-11-02 15:00 UTC"
+MAS_VERSION="7.6.5"
+MAS_UPDATED="2026-11-03 00:00 UTC"
 MAS_REPO="itzmasgaming/gui"
 MAS_FILE="mas-backuper-ultra"
 
@@ -135,7 +135,7 @@ import asyncssh
 import discord
 from discord import app_commands
 
-VERSION = "7.0.0"
+VERSION = "7.6.5"
 UPDATED = "2026-11-02 15:00 UTC"
 
 DATA_DIR = Path(os.environ.get("MAS_DATA_DIR", Path.home() / ".mas-backup"))
@@ -1034,7 +1034,7 @@ async def read_exact(f, n: int) -> bytes:
 
 
 # ------------------------------------------------------------------ GUI helpers (every message is an embed)
-FOOTER = "MAS GUI v6.7"
+FOOTER = "MAS GUI v7.6.5"
 _KIND = {"info": ("ℹ️", 0x00E5FF), "ok": ("✅", 0x2ECC71), "warn": ("⚠️", 0xF1C40F),
          "error": ("❌", 0xE74C3C), "wait": ("⏳", 0x3498DB)}
 
@@ -5736,8 +5736,9 @@ show_version() {
   rtmp="$(mktemp)"
   fetch_latest "$rtmp" && remote="$(cat "$rtmp")"
   rm -f "$rtmp"
-  latest_ver="$(printf '%s\n' "$remote" | grep -m1 '^MAS_VERSION=' | cut -d'"' -f2)"
-  latest_date="$(printf '%s\n' "$remote" | grep -m1 '^MAS_UPDATED=' | cut -d'"' -f2)"
+  # here-strings (not pipes) feed grep, so grep's "-m1" early exit can't SIGPIPE/break a pipe mid-write
+  latest_ver="$(grep -m1 '^MAS_VERSION=' <<< "$remote" | cut -d'"' -f2)"
+  latest_date="$(grep -m1 '^MAS_UPDATED=' <<< "$remote" | cut -d'"' -f2)"
   # the commit time on GitHub is the real "last updated" moment, when it can be read
   iso="$(curl -fsSL --max-time 10 "$api" 2>/dev/null | grep -o '"date": *"[^"]*"' | tail -n1 | cut -d'"' -f4)"
   if [[ -n "$iso" ]]; then
