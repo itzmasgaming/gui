@@ -126,6 +126,7 @@ import stat
 import sys
 import tarfile
 import time
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
@@ -339,11 +340,30 @@ def parse_upterm(text: str) -> tuple[str, str, int]:
     return token, host, port
 
 
+DIRECT_KEY = DATA_DIR / "direct_key"      # the bot's own key for DIRECT (non-Upterm) "public key, no password" logins
+
+
+def direct_pubkey() -> str:
+    """The bot's public key for direct public-key logins. The VPS owner adds this line to the VPS's
+    ~/.ssh/authorized_keys themselves; it's a different key from the Upterm one on purpose, so revoking
+    one method never affects the other."""
+    if not DIRECT_KEY.exists():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        fd = os.open(DIRECT_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key.export_private_key())
+        os.chmod(DIRECT_KEY, 0o600)
+    pub = asyncssh.read_private_key(str(DIRECT_KEY)).export_public_key().decode().split()
+    return f"{pub[0]} {pub[1]} mas-bot-direct"
+
+
 def remote_label(v: dict, port: bool = False) -> str:
     """Short 'where is this VPS' text. An Upterm VPS never shows its token."""
     if v.get("upterm"):
         return f"Upterm tunnel ({v.get('host', UPTERM_HOST)})"
-    return str(v.get("user", "?")) + "@" + str(v.get("host", "?")) + (":" + str(v.get("port", 22)) if port else "")
+    tag = {"key": " (key)", "directkey": " (key, no password)"}.get(v.get("auth"), "")
+    return str(v.get("user", "?")) + "@" + str(v.get("host", "?")) + (":" + str(v.get("port", 22)) if port else "") + tag
 
 
 async def ssh_connect(v: dict):
@@ -352,7 +372,18 @@ async def ssh_connect(v: dict):
             v.get("host", UPTERM_HOST), port=int(v.get("port", 22)), username=v["user"],
             client_keys=[str(UPTERM_KEY)], known_hosts=None, keepalive_interval=30,
             preferred_auth="publickey"), 25)
-    # known_hosts=None disables host-key checking (simple, but open to MITM).
+    if v.get("auth") == "directkey":   # the VPS already trusts the bot's own direct_pubkey()
+        return await asyncio.wait_for(asyncssh.connect(
+            v["host"], port=int(v.get("port", 22)), username=v.get("user", "root"),
+            client_keys=[str(DIRECT_KEY)], known_hosts=None, keepalive_interval=30,
+            preferred_auth="publickey"), 25)
+    if v.get("auth") == "key":        # a private key the owner pasted or uploaded for this one VPS
+        key = asyncssh.import_private_key(v["keydata"], passphrase=v.get("passphrase") or None)
+        return await asyncio.wait_for(asyncssh.connect(
+            v["host"], port=int(v.get("port", 22)), username=v.get("user", "root"),
+            client_keys=[key], known_hosts=None, keepalive_interval=30,
+            preferred_auth="publickey"), 25)
+    # password (default). known_hosts=None disables host-key checking (simple, but open to MITM).
     return await asyncssh.connect(
         v["host"], port=int(v.get("port", 22)), username=v.get("user", "root"),
         password=v.get("password") or None, known_hosts=None, keepalive_interval=30,
@@ -1767,7 +1798,7 @@ class Confirm(discord.ui.View):
 
 
 async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, login_text: str) -> None:
-    """Shared last step of every way to add a VPS (IP + password, or Upterm)."""
+    """Shared last step of every way to add a VPS (see ADD_METHODS for the full list)."""
     asyncio.create_task(sync_main(interaction.client))        # new status channel in the main server
     request_self_backup(interaction.client)                   # ...and the bot's own data backup
     guild = dbg(interaction)
@@ -1792,12 +1823,87 @@ async def finish_vps_add(interaction: discord.Interaction, n: int, v: dict, logi
              ("📊 See its details", f"`/info-vps number:{n}`", True)]), ephemeral=True)
 
 
+ADD_METHODS = [
+    ("password", "🌐", "IP + password", "The classic way: public IP, SSH port, user and password."),
+    ("key", "🔑", "Private key (paste)", "Paste a private key you already have, right into Discord."),
+    ("keyfile", "📎", "Private key (upload file)", "Upload the key file itself instead of pasting it."),
+    ("directkey", "🗝️", "Public key, no password", "You add the bot's own public key to the VPS yourself."),
+    ("upterm", "🔌", "Upterm (no public IP)", "The VPS connects out to a relay. Good behind NAT/firewalls."),
+    ("connstring", "🔗", "Connection string", "One line: ssh://user:password@host:port"),
+    ("json", "📋", "Paste JSON config", "Paste {\"host\":..,\"user\":..,\"password\":..} etc. Great for scripts."),
+    ("jsonfile", "🗂️", "Import config file", "Upload a .json/.txt file with the connection details."),
+    ("clone", "🧬", "Clone an existing VPS", "Reuse another VPS's login, just point it at a new host."),
+    ("local", "💻", "This machine (no SSH)", "Back up the machine the bot itself runs on."),
+]
+
+
 def add_method_embed() -> discord.Embed:
     return ui("info", "Add a VPS - how should I connect?",
-              "Pick the way that fits your VPS:",
-              [("🌐 IP + password", "The VPS has a public IP and you know its SSH port, user and password."),
-               ("🔌 Upterm (SSH replacement)", "The VPS has **no public IP / IPv4**, or you can't open an SSH port. "
-                                              "The VPS connects out, and you just paste one `ssh …` line.")])
+              "Pick whichever of these **10 ways** fits your VPS:",
+              [(f"{ic} {lbl}", desc) for _, ic, lbl, desc in ADD_METHODS])
+
+
+def direct_key_embed() -> discord.Embed:
+    return ui("info", "🗝️ Public key, no password",
+              "Works like **IP + password**, but the VPS trusts a key instead of storing a password.\n\n"
+              "**1️⃣** On the VPS, add this line to `~/.ssh/authorized_keys` (as the user you'll connect with):\n"
+              f"```\n{direct_pubkey()}\n```\n"
+              "One easy way: `echo '" + direct_pubkey() + "' >> ~/.ssh/authorized_keys`\n\n"
+              "**2️⃣** Press **Enter host** below.",
+              [("🔒 Is it safe?", "This key is only ever used for direct logins you explicitly set up this way.", True),
+               ("♻️ Revoke it", "Just remove that line from `authorized_keys` on the VPS.", True)])
+
+
+async def wait_for_attachment(interaction: discord.Interaction, prompt_title: str, prompt_desc: str,
+                              timeout: int = 180) -> bytes | None:
+    """Edits the current message asking for a file, waits for the owner's next message with an attachment
+    in the same channel, and returns its raw bytes (or None on timeout/cancel)."""
+    await interaction.edit_original_response(embed=ui("info", prompt_title, prompt_desc), view=None)
+
+    def check(m: discord.Message) -> bool:
+        return (m.author.id == interaction.user.id and m.channel.id == interaction.channel_id
+                and len(m.attachments) > 0)
+
+    try:
+        msg = await interaction.client.wait_for("message", check=check, timeout=timeout)
+    except asyncio.TimeoutError:
+        await interaction.edit_original_response(embed=ui("error", "Timed out", "No file arrived in time. Run `/vps add` again."))
+        return None
+    data = await msg.attachments[0].read()
+    try:
+        await msg.delete()          # don't leave secrets sitting in chat history
+    except discord.HTTPException:
+        pass
+    return data
+
+
+def parse_conn_string(text: str) -> dict:
+    """ssh://user:password@host:port  (password and port are optional)."""
+    t = text.strip()
+    if "://" not in t:
+        t = "ssh://" + t
+    u = urllib.parse.urlsplit(t)
+    if not u.hostname or not u.username:
+        raise ValueError("Use the form `ssh://user:password@host:port` (port optional).")
+    return {"host": u.hostname, "port": u.port or 22, "user": u.username, "password": u.password or ""}
+
+
+def parse_json_config(text: str) -> dict:
+    try:
+        d = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"That's not valid JSON ({e}).") from None
+    if not isinstance(d, dict) or not d.get("host"):
+        raise ValueError('Needs at least `"host"`. Example: {"host":"1.2.3.4","user":"root","password":"..."}')
+    v = {"host": str(d["host"]).strip(), "port": int(d.get("port", 22)), "user": str(d.get("user", "root")).strip()}
+    if d.get("key"):
+        v["auth"] = "key"
+        v["keydata"] = str(d["key"])
+        if d.get("passphrase"):
+            v["passphrase"] = str(d["passphrase"])
+    else:
+        v["password"] = str(d.get("password", ""))
+    return v
 
 
 def upterm_embed() -> discord.Embed:
@@ -1822,13 +1928,366 @@ class AddMethodView(discord.ui.View):
     async def interaction_check(self, i: discord.Interaction) -> bool:
         return i.user.id == self.owner_id
 
-    @discord.ui.button(label="IP + password", emoji="🌐", style=discord.ButtonStyle.primary)
-    async def ip_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.send_modal(VpsAddModal())
+    @discord.ui.select(placeholder="How should I connect?",
+                       options=[discord.SelectOption(label=lbl, value=key, emoji=ic, description=desc[:100])
+                                for key, ic, lbl, desc in ADD_METHODS])
+    async def pick(self, i: discord.Interaction, select: discord.ui.Select):
+        method = select.values[0]
+        if method == "password":
+            await i.response.send_modal(VpsAddModal())
+        elif method == "key":
+            await i.response.send_modal(KeyAddModal())
+        elif method == "keyfile":
+            await i.response.send_modal(KeyFileHostModal())
+        elif method == "upterm":
+            await i.response.edit_message(embed=upterm_embed(), view=UptermView(self.owner_id))
+        elif method == "directkey":
+            await i.response.edit_message(embed=direct_key_embed(), view=DirectKeyView(self.owner_id))
+        elif method == "connstring":
+            await i.response.send_modal(ConnStringModal())
+        elif method == "json":
+            await i.response.send_modal(JsonAddModal())
+        elif method == "jsonfile":
+            await i.response.send_modal(JsonFileNumberModal())
+        elif method == "clone":
+            if not any(not load_vps(n).get("upterm") for n in vps_numbers()):
+                await reply(i, ui("warn", "Nothing to clone yet", "Add a VPS another way first (Upterm VPS can't be "
+                                  "cloned, their link expires), then you can clone it."), ephemeral=True)
+                return
+            await i.response.edit_message(embed=ui("info", "🧬 Clone an existing VPS", "Pick the VPS whose login you want to reuse:"),
+                                         view=CloneSelectView(self.owner_id))
+        elif method == "local":
+            await add_local_vps(i)
 
-    @discord.ui.button(label="Upterm (SSH replacement)", emoji="🔌", style=discord.ButtonStyle.success)
-    async def upterm_btn(self, i: discord.Interaction, b: discord.ui.Button):
-        await i.response.edit_message(embed=upterm_embed(), view=UptermView(self.owner_id))
+
+class KeyAddModal(discord.ui.Modal, title="Add VPS - private key"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+    host = discord.ui.TextInput(label="VPS IP / host", placeholder="1.2.3.4", max_length=255)
+    port = discord.ui.TextInput(label="SSH port", default="22", max_length=5)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+    key = discord.ui.TextInput(label="Private key (-----BEGIN ...-----)", style=discord.TextStyle.paragraph, max_length=4000)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            v = {"host": self.host.value.strip(), "port": int(self.port.value), "user": self.user.value.strip(),
+                 "auth": "key", "keydata": self.key.value, "vps": n}
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via pasted key", n)
+            await finish_vps_add(interaction, n, v, "SSH key login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("key add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("key modal error: %s", error)
+
+
+class KeyFileHostModal(discord.ui.Modal, title="Add VPS - key file (1/2)"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+    host = discord.ui.TextInput(label="VPS IP / host", placeholder="1.2.3.4", max_length=255)
+    port = discord.ui.TextInput(label="SSH port", default="22", max_length=5)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+    passphrase = discord.ui.TextInput(label="Key passphrase (leave blank if none)", required=False, max_length=200)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+        except Exception as e:  # noqa: BLE001
+            await interaction.response.send_message(embed=ui("error", "Could not add VPS", str(e)), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=ui("wait", "Now send the key file", "Attach the private key "
+                                                          "file as your next message in this channel."), ephemeral=True)
+        data = await wait_for_attachment(interaction, "Waiting for the key file…",
+                                        "Attach the private key file as your next message in this channel (3 min).")
+        if data is None:
+            return
+        try:
+            v = {"host": self.host.value.strip(), "port": int(self.port.value), "user": self.user.value.strip(),
+                 "auth": "key", "keydata": data.decode("utf-8", "ignore"), "vps": n}
+            if self.passphrase.value:
+                v["passphrase"] = self.passphrase.value
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via uploaded key", n)
+            await finish_vps_add(interaction, n, v, "SSH key login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("key file add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.edit_original_response(embed=ui("error", "Could not add VPS", msg[:1000]), view=None)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("key file modal error: %s", error)
+
+
+class DirectKeyView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Enter host", emoji="⌨️", style=discord.ButtonStyle.success)
+    async def enter_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(DirectKeyModal())
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=add_method_embed(), view=AddMethodView(self.owner_id))
+
+
+class DirectKeyModal(discord.ui.Modal, title="Add VPS - public key"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+    host = discord.ui.TextInput(label="VPS IP / host", placeholder="1.2.3.4", max_length=255)
+    port = discord.ui.TextInput(label="SSH port", default="22", max_length=5)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            v = {"host": self.host.value.strip(), "port": int(self.port.value), "user": self.user.value.strip(),
+                 "auth": "directkey", "vps": n}
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via direct public key", n)
+            await finish_vps_add(interaction, n, v, "Public-key login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("direct key add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            if "key" in msg.lower() or isinstance(e, asyncssh.PermissionDenied):
+                msg += "\n\nDid you add the public key line to `~/.ssh/authorized_keys` on the VPS?"
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("direct key modal error: %s", error)
+
+
+class ConnStringModal(discord.ui.Modal, title="Add VPS - connection string"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+    conn = discord.ui.TextInput(label="Connection string", placeholder="ssh://user:password@host:port", max_length=500)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            v = parse_conn_string(self.conn.value)
+            v["vps"] = n
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via connection string", n)
+            await finish_vps_add(interaction, n, v, "SSH login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("conn string add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("conn string modal error: %s", error)
+
+
+class JsonAddModal(discord.ui.Modal, title="Add VPS - paste JSON"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+    data = discord.ui.TextInput(label="JSON", style=discord.TextStyle.paragraph,
+                                placeholder='{"host":"1.2.3.4","port":22,"user":"root","password":"..."}', max_length=4000)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            v = parse_json_config(self.data.value)
+            v["vps"] = n
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via pasted JSON", n)
+            await finish_vps_add(interaction, n, v, "SSH login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("json add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("json modal error: %s", error)
+
+
+class JsonFileNumberModal(discord.ui.Modal, title="Add VPS - import file (1/2)"):
+    number = discord.ui.TextInput(label="VPS number", max_length=3)
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+        except Exception as e:  # noqa: BLE001
+            await interaction.response.send_message(embed=ui("error", "Could not add VPS", str(e)), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=ui("wait", "Now send the config file", "Attach a .json/.txt "
+                                                          "file with the connection details as your next message."),
+                                                 ephemeral=True)
+        data = await wait_for_attachment(interaction, "Waiting for the file…",
+                                        "Attach a .json/.txt file with the connection details (3 min).")
+        if data is None:
+            return
+        try:
+            v = parse_json_config(data.decode("utf-8", "ignore"))
+            v["vps"] = n
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added via imported file", n)
+            await finish_vps_add(interaction, n, v, "SSH login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("json file add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.edit_original_response(embed=ui("error", "Could not add VPS", msg[:1000]), view=None)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("json file modal error: %s", error)
+
+
+class CloneSelectView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+        nums = [n for n in vps_numbers() if not load_vps(n).get("upterm")][:25]  # Upterm tokens expire; skip them
+        opts = [discord.SelectOption(label=f"vps-{n}", description=remote_label(load_vps(n), True)[:100], value=str(n))
+                for n in nums]
+        if opts:
+            self.pick.options = opts
+        else:
+            self.remove_item(self.pick)
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.select(placeholder="Clone which VPS?", options=[discord.SelectOption(label="—", value="0")])
+    async def pick(self, i: discord.Interaction, select: discord.ui.Select):
+        await i.response.send_modal(CloneModal(int(select.values[0])))
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=add_method_embed(), view=AddMethodView(self.owner_id))
+
+
+class CloneModal(discord.ui.Modal, title="Clone VPS"):
+    number = discord.ui.TextInput(label="New VPS number", max_length=3)
+    host = discord.ui.TextInput(label="New VPS IP / host", placeholder="1.2.3.4", max_length=255)
+    password = discord.ui.TextInput(label="Password (only if the source uses one)", required=False, max_length=200)
+
+    def __init__(self, src_n: int):
+        super().__init__()
+        self.src_n = src_n
+        try:
+            self.number.default = str(next_vps_number())
+        except Exception:  # noqa: BLE001
+            self.number.default = "1"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            n = int(self.number.value)
+            if n < 1:
+                raise ValueError("VPS number must be 1 or higher")
+            if vps_file(n).exists():
+                raise ValueError(f"vps{n} already exists")
+            src = load_vps(self.src_n)
+            v = dict(src)
+            for k in ("vps", "created", "synced"):
+                v.pop(k, None)
+            v["host"] = self.host.value.strip()
+            if self.password.value and v.get("auth", "password") == "password" and not v.get("upterm"):
+                v["password"] = self.password.value
+            v["vps"] = n
+            await test_ssh(v)
+            save_vps(n, v)
+            log.info("VPS %d added by cloning vps%d", n, self.src_n)
+            await finish_vps_add(interaction, n, v, f"Cloned vps-{self.src_n}'s login. SSH login works.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("clone add failed: %s", e)
+            msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("clone modal error: %s", error)
+
+
+async def add_local_vps(interaction: discord.Interaction) -> None:
+    for n in vps_numbers():
+        if load_vps(n).get("local"):
+            await reply(interaction, ui("warn", "Already added", f"This machine is already `vps-{n}`."),
+                       ephemeral=True)
+            return
+    n = next_vps_number()
+    v = {"local": True, "host": "localhost", "user": "local", "vps": n}
+    await interaction.response.defer(ephemeral=True)
+    await finish_vps_add(interaction, n, v, "This machine is now a VPS.")
 
 
 class UptermView(discord.ui.View):
@@ -2079,7 +2538,7 @@ async def cmd_setup(interaction: discord.Interaction):
 vps_group = app_commands.Group(name="vps", description="Manage VPS backups")
 
 
-@vps_group.command(name="add", description="Add a VPS (IP + password, or Upterm for VPS without a public IP)")
+@vps_group.command(name="add", description="Add a VPS - 10 ways to connect (password, key, Upterm, clone, local, ...)")
 async def cmd_vps_add(interaction: discord.Interaction):
     if await guard(interaction):
         await interaction.response.send_message(embed=add_method_embed(), view=AddMethodView(interaction.user.id),
