@@ -2446,6 +2446,37 @@ async def guard(interaction: discord.Interaction, owner_only: bool = False) -> b
     return True
 
 
+async def quick_live(v: dict) -> dict:
+    """Just checks whether the VPS answers SSH right now (no system-info script, so it's fast).
+    -> {state, ms, error}  state: 'online' | 'auth' (reachable, login refused) | 'offline'"""
+    if v.get("local"):
+        return {"state": "online", "ms": 0, "error": ""}
+    t0 = time.monotonic()
+    try:
+        conn = await asyncio.wait_for(ssh_connect(v), 10)
+    except asyncio.TimeoutError:
+        return {"state": "offline", "ms": 0, "error": "connection timed out"}
+    except asyncssh.PermissionDenied:
+        return {"state": "auth", "ms": int((time.monotonic() - t0) * 1000),
+                "error": "the Upterm session was not found" if v.get("upterm") else "login refused"}
+    except Exception as e:  # noqa: BLE001
+        return {"state": "offline", "ms": 0, "error": (str(e) or type(e).__name__)[:150]}
+    ms = int((time.monotonic() - t0) * 1000)
+    conn.close()
+    await conn.wait_closed()
+    return {"state": "online", "ms": ms, "error": ""}
+
+
+def conn_line(lv: dict | None, local: bool) -> str:
+    if lv is None or isinstance(lv, BaseException):
+        return "🔴 **OFFLINE** • not connected"
+    if lv["state"] == "online":
+        return "🟢 **ONLINE** • connected" + ("" if local else f" in **{lv['ms']} ms**")
+    if lv["state"] == "auth":
+        return f"🟠 **REACHABLE, LOGIN REFUSED** • {lv['ms']} ms"
+    return "🔴 **OFFLINE** • not connected"
+
+
 async def send_nodes(interaction: discord.Interaction) -> None:
     if not await guard(interaction):
         return
@@ -2453,25 +2484,34 @@ async def send_nodes(interaction: discord.Interaction) -> None:
     if not nums:
         await reply(interaction, ui("info", "No VPS yet", "Add your first one with `/vps add`."), ephemeral=True)
         return
-    fields = []
-    for n in nums[:25]:
+    nums = nums[:25]
+    await reply(interaction, ui("wait", "Checking your VPS…", f"Connecting to **{len(nums)}** VPS to check who's online…"),
+               ephemeral=True)
+    vs: dict[int, dict] = {}
+    for n in nums:
         try:
-            v = load_vps(n)
+            vs[n] = load_vps(n)
         except Exception:  # noqa: BLE001
             continue
-        where = "this machine (local)" if v.get("local") else \
-            remote_label(v, True)
+    live = dict(zip(vs.keys(), await asyncio.gather(*(quick_live(v) for v in vs.values()), return_exceptions=True)))
+    fields = []
+    for n, v in vs.items():
+        where = "this machine (local)" if v.get("local") else remote_label(v, True)
         if vps_has_data(dbg(interaction), n) and not v.get("synced"):
             st = f"⏳ waiting: `/importbackup vps:{n}` or `/focusbackup vps:{n}`"
         elif v.get("last_backup"):
             st = f"✅ last backup <t:{int(v['last_backup'])}:R>"
         else:
             st = "⚪ no backup yet"
-        fields.append((f"🖥️ vps-{n}", f"📡 `{where}`\n{st}", len(nums) > 1))
-    await reply(interaction, ui("info", "VPS nodes",
-                                f"**{len(fields)}** VPS added • `/info-vps number:<n>` for full details\n"
-                                f"🧊 Ultra Storage: **{'ON' if ultra_on() else 'OFF'}** • change it with `/ultra`",
-                                fields), ephemeral=True)
+        fields.append((f"🖥️ vps-{n}", f"{conn_line(live.get(n), v.get('local', False))}\n📡 `{where}`\n{st}",
+                      len(vs) > 1))
+    embed = ui("info", "VPS nodes",
+              f"**{len(fields)}** VPS added • `/info-vps number:<n>` for full details\n"
+              f"🧊 Ultra Storage: **{'ON' if ultra_on() else 'OFF'}** • change it with `/ultra`", fields)
+    try:
+        await interaction.edit_original_response(embed=embed)
+    except discord.HTTPException:
+        await reply(interaction, embed, ephemeral=True)
 
 
 # ------------------------------------------------------------------ commands
