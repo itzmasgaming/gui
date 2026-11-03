@@ -363,6 +363,7 @@ def remote_label(v: dict, port: bool = False) -> str:
     if v.get("upterm"):
         return f"Upterm tunnel ({v.get('host', UPTERM_HOST)})"
     tag = {"key": " (key)", "directkey": " (key, no password)"}.get(v.get("auth"), "")
+    tag += {"tailscale": " (Tailscale)", "ngrok": " (ngrok tunnel)"}.get(v.get("net"), "")
     return str(v.get("user", "?")) + "@" + str(v.get("host", "?")) + (":" + str(v.get("port", 22)) if port else "") + tag
 
 
@@ -1828,10 +1829,10 @@ ADD_METHODS = [
     ("key", "🔑", "Private key (paste)", "Paste a private key you already have, right into Discord."),
     ("keyfile", "📎", "Private key (upload file)", "Upload the key file itself instead of pasting it."),
     ("directkey", "🗝️", "Public key, no password", "You add the bot's own public key to the VPS yourself."),
-    ("upterm", "🔌", "Upterm (no public IP)", "The VPS connects out to a relay. Good behind NAT/firewalls."),
+    ("upterm", "🔌", "Upterm (no public IP)", "The VPS connects out to a free relay. No account, no setup on the VPS."),
+    ("tailscale", "🐡", "Tailscale", "No public IP needed. The VPS and this bot share a private Tailscale network."),
+    ("ngrok", "🚇", "ngrok TCP tunnel", "No public IP needed. ngrok forwards a public host:port to the VPS's SSH port."),
     ("connstring", "🔗", "Connection string", "One line: ssh://user:password@host:port"),
-    ("json", "📋", "Paste JSON config", "Paste {\"host\":..,\"user\":..,\"password\":..} etc. Great for scripts."),
-    ("jsonfile", "🗂️", "Import config file", "Upload a .json/.txt file with the connection details."),
     ("clone", "🧬", "Clone an existing VPS", "Reuse another VPS's login, just point it at a new host."),
     ("local", "💻", "This machine (no SSH)", "Back up the machine the bot itself runs on."),
 ]
@@ -1888,22 +1889,36 @@ def parse_conn_string(text: str) -> dict:
     return {"host": u.hostname, "port": u.port or 22, "user": u.username, "password": u.password or ""}
 
 
-def parse_json_config(text: str) -> dict:
-    try:
-        d = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"That's not valid JSON ({e}).") from None
-    if not isinstance(d, dict) or not d.get("host"):
-        raise ValueError('Needs at least `"host"`. Example: {"host":"1.2.3.4","user":"root","password":"..."}')
-    v = {"host": str(d["host"]).strip(), "port": int(d.get("port", 22)), "user": str(d.get("user", "root")).strip()}
-    if d.get("key"):
-        v["auth"] = "key"
-        v["keydata"] = str(d["key"])
-        if d.get("passphrase"):
-            v["passphrase"] = str(d["passphrase"])
-    else:
-        v["password"] = str(d.get("password", ""))
-    return v
+def parse_ngrok(text: str) -> tuple[str, int]:
+    """Pull host:port out of whatever ngrok printed, e.g. `tcp://0.tcp.ngrok.io:12345` or `0.tcp.ngrok.io:12345`."""
+    m = re.search(r"(?:tcp://)?([A-Za-z0-9.\-]+):(\d+)", text.strip())
+    if not m:
+        raise ValueError("Paste the address ngrok printed, like `tcp://0.tcp.ngrok.io:12345` or `0.tcp.ngrok.io:12345`.")
+    return m.group(1), int(m.group(2))
+
+
+def tailscale_embed() -> discord.Embed:
+    return ui("info", "🐡 Tailscale",
+              "Works like **IP + password**, but over your [Tailscale](https://tailscale.com) network instead of "
+              "the public internet. Good for a VPS with no public IP, a closed firewall, or behind CGNAT.\n\n"
+              "**1️⃣** Install Tailscale on the VPS and sign it into your tailnet.\n"
+              "**2️⃣** Make sure **this bot's machine** is signed into the same tailnet.\n"
+              "**3️⃣** Press **Enter details** below and use the VPS's Tailscale IP (`100.x.y.z`) or MagicDNS "
+              "name (e.g. `vps1.your-tailnet.ts.net`) as the host.",
+              [("🔒 No public IP needed", "Nothing has to be exposed to the internet.", True),
+               ("🔑 Still needs a login", "A normal SSH user + password (or key) on the VPS.", True)])
+
+
+def ngrok_embed() -> discord.Embed:
+    return ui("info", "🚇 ngrok TCP tunnel",
+              "Also for a VPS with **no public IP**: [ngrok](https://ngrok.com) opens a public `host:port` that "
+              "forwards straight to the VPS's SSH port.\n\n"
+              "**1️⃣** On the VPS: `ngrok tcp 22` (free ngrok account needed, one-time `ngrok config add-authtoken`).\n"
+              "**2️⃣** It prints a `Forwarding` line like `tcp://0.tcp.ngrok.io:12345 -> localhost:22`. Copy the "
+              "`tcp://...` part.\n"
+              "**3️⃣** Press **Enter details** below and paste it, plus the VPS's normal SSH user/password.",
+              [("♻️ Tunnel restarted?", "Free ngrok addresses change each time. Update with the same VPS number.", True),
+               ("🔑 Still needs a login", "A normal SSH user + password (or key) on the VPS.", True)])
 
 
 def upterm_embed() -> discord.Embed:
@@ -1943,12 +1958,12 @@ class AddMethodView(discord.ui.View):
             await i.response.edit_message(embed=upterm_embed(), view=UptermView(self.owner_id))
         elif method == "directkey":
             await i.response.edit_message(embed=direct_key_embed(), view=DirectKeyView(self.owner_id))
+        elif method == "tailscale":
+            await i.response.edit_message(embed=tailscale_embed(), view=TailscaleView(self.owner_id))
+        elif method == "ngrok":
+            await i.response.edit_message(embed=ngrok_embed(), view=NgrokView(self.owner_id))
         elif method == "connstring":
             await i.response.send_modal(ConnStringModal())
-        elif method == "json":
-            await i.response.send_modal(JsonAddModal())
-        elif method == "jsonfile":
-            await i.response.send_modal(JsonFileNumberModal())
         elif method == "clone":
             if not any(not load_vps(n).get("upterm") for n in vps_numbers()):
                 await reply(i, ui("warn", "Nothing to clone yet", "Add a VPS another way first (Upterm VPS can't be "
@@ -2134,10 +2149,30 @@ class ConnStringModal(discord.ui.Modal, title="Add VPS - connection string"):
         log.exception("conn string modal error: %s", error)
 
 
-class JsonAddModal(discord.ui.Modal, title="Add VPS - paste JSON"):
+class TailscaleView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Enter details", emoji="⌨️", style=discord.ButtonStyle.success)
+    async def enter_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(TailscaleModal())
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=add_method_embed(), view=AddMethodView(self.owner_id))
+
+
+class TailscaleModal(discord.ui.Modal, title="Add VPS - Tailscale"):
     number = discord.ui.TextInput(label="VPS number", max_length=3)
-    data = discord.ui.TextInput(label="JSON", style=discord.TextStyle.paragraph,
-                                placeholder='{"host":"1.2.3.4","port":22,"user":"root","password":"..."}', max_length=4000)
+    host = discord.ui.TextInput(label="Tailscale IP or MagicDNS name", placeholder="100.x.y.z or vps1.tailnet.ts.net",
+                                max_length=255)
+    port = discord.ui.TextInput(label="SSH port", default="22", max_length=5)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+    password = discord.ui.TextInput(label="Password", required=True, max_length=200)
 
     def __init__(self):
         super().__init__()
@@ -2154,23 +2189,45 @@ class JsonAddModal(discord.ui.Modal, title="Add VPS - paste JSON"):
                 raise ValueError("VPS number must be 1 or higher")
             if vps_file(n).exists():
                 raise ValueError(f"vps{n} already exists")
-            v = parse_json_config(self.data.value)
-            v["vps"] = n
+            v = {"host": self.host.value.strip(), "port": int(self.port.value), "user": self.user.value.strip(),
+                 "password": self.password.value, "net": "tailscale", "vps": n}
             await test_ssh(v)
             save_vps(n, v)
-            log.info("VPS %d added via pasted JSON", n)
-            await finish_vps_add(interaction, n, v, "SSH login works.")
+            log.info("VPS %d added via Tailscale", n)
+            await finish_vps_add(interaction, n, v, "SSH login over Tailscale works.")
         except Exception as e:  # noqa: BLE001
-            log.warning("json add failed: %s", e)
+            log.warning("tailscale add failed: %s", e)
             msg = str(e) if isinstance(e, ValueError) else conn_error(e)
+            if isinstance(e, (asyncio.TimeoutError, OSError)):
+                msg += "\n\nIs the VPS signed into the same tailnet as this bot's machine?"
             await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        log.exception("json modal error: %s", error)
+        log.exception("tailscale modal error: %s", error)
 
 
-class JsonFileNumberModal(discord.ui.Modal, title="Add VPS - import file (1/2)"):
+class NgrokView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=900)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, i: discord.Interaction) -> bool:
+        return i.user.id == self.owner_id
+
+    @discord.ui.button(label="Enter details", emoji="⌨️", style=discord.ButtonStyle.success)
+    async def enter_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(NgrokModal())
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back_btn(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.edit_message(embed=add_method_embed(), view=AddMethodView(self.owner_id))
+
+
+class NgrokModal(discord.ui.Modal, title="Add VPS - ngrok tunnel"):
     number = discord.ui.TextInput(label="VPS number", max_length=3)
+    addr = discord.ui.TextInput(label="ngrok forwarding address", placeholder="tcp://0.tcp.ngrok.io:12345", max_length=200)
+    user = discord.ui.TextInput(label="Username", default="root", max_length=64)
+    password = discord.ui.TextInput(label="Password", required=True, max_length=200)
 
     def __init__(self):
         super().__init__()
@@ -2180,36 +2237,29 @@ class JsonFileNumberModal(discord.ui.Modal, title="Add VPS - import file (1/2)")
             self.number.default = "1"
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             n = int(self.number.value)
             if n < 1:
                 raise ValueError("VPS number must be 1 or higher")
             if vps_file(n).exists():
                 raise ValueError(f"vps{n} already exists")
-        except Exception as e:  # noqa: BLE001
-            await interaction.response.send_message(embed=ui("error", "Could not add VPS", str(e)), ephemeral=True)
-            return
-        await interaction.response.send_message(embed=ui("wait", "Now send the config file", "Attach a .json/.txt "
-                                                          "file with the connection details as your next message."),
-                                                 ephemeral=True)
-        data = await wait_for_attachment(interaction, "Waiting for the file…",
-                                        "Attach a .json/.txt file with the connection details (3 min).")
-        if data is None:
-            return
-        try:
-            v = parse_json_config(data.decode("utf-8", "ignore"))
-            v["vps"] = n
+            host, port = parse_ngrok(self.addr.value)
+            v = {"host": host, "port": port, "user": self.user.value.strip(), "password": self.password.value,
+                 "net": "ngrok", "vps": n}
             await test_ssh(v)
             save_vps(n, v)
-            log.info("VPS %d added via imported file", n)
-            await finish_vps_add(interaction, n, v, "SSH login works.")
+            log.info("VPS %d added via ngrok tunnel", n)
+            await finish_vps_add(interaction, n, v, "SSH login through the tunnel works.")
         except Exception as e:  # noqa: BLE001
-            log.warning("json file add failed: %s", e)
+            log.warning("ngrok add failed: %s", e)
             msg = str(e) if isinstance(e, ValueError) else conn_error(e)
-            await interaction.edit_original_response(embed=ui("error", "Could not add VPS", msg[:1000]), view=None)
+            if isinstance(e, (asyncio.TimeoutError, OSError)):
+                msg += "\n\nIs `ngrok tcp 22` still running on the VPS? Free tunnels close if that session ends."
+            await interaction.followup.send(embed=ui("error", "Could not add VPS", msg[:1000]), ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        log.exception("json file modal error: %s", error)
+        log.exception("ngrok modal error: %s", error)
 
 
 class CloneSelectView(discord.ui.View):
@@ -3287,6 +3337,18 @@ def where_of(v: dict) -> str:
 # ------------------------------------------------------------------ /sshx
 SSHX_SCRIPT = r'''
 export PATH="$PATH:/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/.sshx/bin:$HOME/bin:/root/.local/bin"
+mkdir -p ~/.mas 2>/dev/null
+PIDFILE=~/.mas/sshx.pid
+# Always stop a previous MAS-started sshx session first. Without this, every /sshx run starts ANOTHER
+# sshx process that never gets cleaned up (bot restarts, timed-out Stop buttons, people re-running /sshx),
+# and those pile up on the VPS using CPU/RAM/network until the VPS bogs down or freezes.
+if [ -f "$PIDFILE" ]; then
+  OLDPID=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+    kill "$OLDPID" 2>/dev/null; sleep 1; kill -9 "$OLDPID" 2>/dev/null
+  fi
+  rm -f "$PIDFILE"
+fi
 if ! command -v sshx >/dev/null 2>&1; then
   if command -v curl >/dev/null 2>&1; then
     curl -sSf https://sshx.io/get | sh >/tmp/mas-sshx-install.log 2>&1
@@ -3309,6 +3371,7 @@ else
   nohup "$BIN" >"$LOG" 2>&1 </dev/null &
 fi
 PID=$!
+echo "$PID" > "$PIDFILE" 2>/dev/null
 ESC=$(printf '\033')
 i=0; URL=""
 while [ $i -lt 40 ]; do
@@ -3321,6 +3384,13 @@ echo "URL=$URL"
 [ -z "$URL" ] && echo "LOG=$(sed "s/${ESC}\[[0-9;?]*[A-Za-z]//g" "$LOG" 2>/dev/null | tail -c 400 | tr '\n' ' ')"
 '''
 _SSHX_URL = re.compile(r"https://sshx\.io/[^\s\"'<>]+")
+STOP_SSHX_SCRIPT = r'''
+PIDFILE=~/.mas/sshx.pid
+PID=$(cat "$PIDFILE" 2>/dev/null)
+if [ -n "$PID" ]; then kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null; fi
+rm -f "$PIDFILE"
+echo done
+'''
 
 
 class SshxView(discord.ui.View):
@@ -3340,8 +3410,7 @@ class SshxView(discord.ui.View):
     async def stop_btn(self, i: discord.Interaction, b: discord.ui.Button):
         await i.response.edit_message(embed=ui("wait", f"Stopping sshx on vps-{self.n}…"), view=None)
         try:
-            if self.pid.isdigit():
-                await run_script(self.v, f"kill {self.pid} 2>/dev/null; sleep 1; kill -9 {self.pid} 2>/dev/null; echo done", 30)
+            await run_script(self.v, STOP_SSHX_SCRIPT, 30)
             await i.edit_original_response(embed=ui("ok", "sshx session stopped",
                                                     f"The link for **vps-{self.n}** no longer works."))
         except Exception as e:  # noqa: BLE001
